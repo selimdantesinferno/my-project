@@ -49,7 +49,7 @@
               <path d="M5 9v12M9 5a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"/>
           </g>
       </svg>
-      <label>{{}}</label>
+      <label>{{adresse1}}</label>
 <br>
       <span class="dot2"></span>
       <br>
@@ -150,9 +150,10 @@
       return {
         info:[],
         latitude:'',
-        longitude:''
-
-      }
+        longitude:'',
+        adresse1:[],
+        adresse2:[]
+        }
     },
     methods: {
       open (link) {
@@ -162,20 +163,25 @@
     mounted () {
       this.$http
         .get('/ride')
-        .then(response => (this.info = response.data))
-this.latitude=this.info.itineraries[0].itinerary[0].x;
-this.longitude=this.info.itineraries[0].itinerary[0].y
-      axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitude + ',' + this.longitude + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
-                .then(response => {
-                console.log(response.data);
+        .then(response => {
+        this.latitude=response.data.itineraries[0].itinerary[0].x;
+        this.longitude=response.data.itineraries[0].itinerary[0].y;
+        axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitude + ',' + this.longitude + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
+                  .then(response => {
+                  this.adresse1=response.data.results[0].formatted_address;
+                  console.log(this.adresse1);
 
+                  })
+                  .catch(e => {
+                  this.errors.push(e)
                 })
-                .catch(e => {
-                this.errors.push(e)
-              })
+                })
+
+
 
 
     }
+
   }
 </script>
 
