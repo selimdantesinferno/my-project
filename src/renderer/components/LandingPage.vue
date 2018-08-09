@@ -66,12 +66,13 @@
         <span class="dot2"></span>
         <br>
       <h5>Adresse de destination</h5>
-      <label></label>
+
       <svg xmlns="http://www.w3.org/2000/svg" width="17" height="23" viewBox="0 0 17 23">
           <path fill="none" fill-rule="evenodd" stroke="#FFF" stroke-width="1.5" d="M8.5 1C12.637 1 16 4.312 16 8.383a7.28 7.28 0 0 1-1.059 3.782L9.14 21.701a.627.627 0 0 1-.532.299h-.004a.627.627 0 0 1-.531-.29L2.12 12.264A7.284 7.284 0 0 1 1 8.383C1 4.313 4.364 1 8.5 1zm0 5A2.504 2.504 0 0 0 6 8.5C6 9.87 7.103 11 8.5 11 9.914 11 11 9.854 11 8.5 11 7.122 9.878 6 8.5 6z"/>
       </svg>
+      <label>{{adresse2}}</label>
       <h5>Coût estimé de la course</h5>
-      <label></label>
+      <label>{{info.price}}</label>
 </td>
           <td>
           <table>
@@ -149,8 +150,11 @@
     data () {
       return {
         info:[],
-        latitude:'',
-        longitude:'',
+        main_path:[],
+        latitudedep:'',
+        longitudedep:'',
+        latitudearr:'',
+        longitudearr:'',
         adresse1:[],
         adresse2:[]
         }
@@ -159,23 +163,43 @@
       open (link) {
         this.$electron.shell.openExternal(link)
       }
+
+
     },
     mounted () {
       this.$http
         .get('/ride')
         .then(response => {
-        this.latitude=response.data.itineraries[0].itinerary[0].x;
-        this.longitude=response.data.itineraries[0].itinerary[0].y;
-        axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitude + ',' + this.longitude + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
-                  .then(response => {
-                  this.adresse1=response.data.results[0].formatted_address;
-                  console.log(this.adresse1);
+this.info=response.data;
+        this.main_path = response.data.itineraries[0].itinerary.map( point =>{
+          return {lat: point.x, lng: point.y}
+          })
 
-                  })
-                  .catch(e => {
-                  this.errors.push(e)
-                })
-                })
+      this.latitudedep=this.main_path[0].lat;
+      this.longitudedep=this.main_path[0].lng;
+      axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitudedep + ',' + this.longitudedep + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
+                .then(response => {
+      this.adresse1=response.data.results[0].formatted_address;
+      })
+                .catch(e => {
+                this.errors.push(e)
+              })
+
+    this.latitudearr=this.main_path[this.main_path.length-1].lat;
+    this.longitudearr=this.main_path[this.main_path.length-1].lng;
+    axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitudearr + ',' + this.longitudearr + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
+           .then(response => {
+              this.adresse2=response.data.results[0].formatted_address;
+              console.log(this.adresse2);
+              })
+                        .catch(e => {
+                        this.errors.push(e)
+                      })
+
+       })
+
+
+
 
 
 
