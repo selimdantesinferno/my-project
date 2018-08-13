@@ -7,9 +7,11 @@
       v-bind:options="mapStyle"
       style="width:287px;height:287px;">
 
-      <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
+      <gmap-polyline v-if="main_path.length > 0" :path="main_path" :options="{strokeColor:'#00acd6'
+}" ref="polyline">
 
       </gmap-polyline>
+<gmap-marker></gmap-marker>
     </gmap-map>
   </div>
 </template>
@@ -24,7 +26,7 @@ export default {
 
       center: { lat: 48.8739399, lng: 2.2946627},
       main_path: [],
-      markers: [],
+      markers:[],
       places: [],
       currentPlace: null,
       mapStyle:{styles:[
@@ -272,8 +274,10 @@ export default {
 
           })
 
+
         })
         .catch(error => console.log(error))
+
       // latitude=this.info.itineraries[0].itinerary[0].x;
       // console.log(latitude);
       // this.geolocate()
@@ -282,14 +286,10 @@ export default {
   methods: {
     // receives a place object via the autocomplete component
 
-    geolocate: function () {
-      navigator.geolocation.getCurrentPosition(position => {
-        this.center = {
-        lat: position.coords.latitude,
-        lng: position.coords.longitude
-        }
-      })
-    }
+
   }
 }
 </script>
+<style>
+
+</style>

@@ -8,7 +8,7 @@
 
       <table class="table1" width="100%" height="100%">
         <tr>
-        <td class="td1">
+        <td>
 <ul>
   <li>
 <img src="../assets/start.svg"
@@ -40,16 +40,46 @@
 </li>
 
 </ul>
+<td>
+<ul>
+<li>
+<label class="resp">Depart</label>
+</li>
+<li>
+<label class="resp">{{datenow}}</label>
+</li>
+<li>
+<label class="resp">Prise en charge du colis</label>
+</li>
+<li>
+<label class="resp">{{datecol}}</label>
+</li>
+<li>
+<label class="resp">Livraison de colis</label>
+</li>
+<li>
+<label class="resp">{{dateliv}}</label>
+</li>
+<li>
+<label class="resp">Arrivée à destination</label>
+</li>
+<li>
+<label class="resp">{{datearr}}</label>
+</li>
+</ul>
+</td>
 </td>
 <td class="td2">
 <h1>Votre trajet Clara</h1>
+<br>
       <h5>Adresse de départ</h5>
+      <br>
       <svg xmlns="http://www.w3.org/2000/svg" width="10" height="22" viewBox="0 0 10 22">
           <g fill="none" fill-rule="evenodd" stroke="#FFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5">
               <path d="M5 9v12M9 5a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"/>
           </g>
       </svg>
-      <label>{{adresse1}}</label>
+      <label class="resp">{{adresse1}}</label>
 <br>
       <span class="dot2"></span>
       <br>
@@ -66,13 +96,15 @@
         <span class="dot2"></span>
         <br>
       <h5>Adresse de destination</h5>
-
+<br>
       <svg xmlns="http://www.w3.org/2000/svg" width="17" height="23" viewBox="0 0 17 23">
           <path fill="none" fill-rule="evenodd" stroke="#FFF" stroke-width="1.5" d="M8.5 1C12.637 1 16 4.312 16 8.383a7.28 7.28 0 0 1-1.059 3.782L9.14 21.701a.627.627 0 0 1-.532.299h-.004a.627.627 0 0 1-.531-.29L2.12 12.264A7.284 7.284 0 0 1 1 8.383C1 4.313 4.364 1 8.5 1zm0 5A2.504 2.504 0 0 0 6 8.5C6 9.87 7.103 11 8.5 11 9.914 11 11 9.854 11 8.5 11 7.122 9.878 6 8.5 6z"/>
       </svg>
-      <label>{{adresse2}}</label>
+      <label class="resp">{{adresse2}}</label>
+      <br><br>
       <h5>Coût estimé de la course</h5>
-      <label>{{info.price}}</label>
+      <br>
+      <label class="resp">{{info.price}}</label>
 </td>
           <td>
           <table>
@@ -80,7 +112,7 @@
           <td>
           <h2 class="dure">Durée</h2>
           <br>
-          <label>
+          <label class="resp">
             {{ Math.trunc(info.time/60)}}
           </label>
           <h2 class="min">min</h2>
@@ -95,8 +127,8 @@
         </div></div></div></td>
               <td><h2 class="dure">Distance</h2>
               <br>
-              <label>
-         {{Math.trunc(info.distance)}}
+              <label class="resp">
+         {{info.distance}}
               </label>
               <h2 class="min">Km</h2>
             </td></tr>
@@ -127,8 +159,8 @@
       </svg>
     </td></tr>
     <tr>
-      <td><label>Mode autonome</label></td>
-      <td><label>Mode manuel</label></td></tr>
+      <td><label class="resp">Mode autonome</label></td>
+      <td><label class="resp">Mode manuel</label></td></tr>
       </table>
 </td>
 </tr>
@@ -144,6 +176,7 @@
 
   import GoogleMap from './GoogleMap'
   import axios from 'axios'
+  import moment from 'moment'
   export default {
     name: 'landing-page',
     components: { GoogleMap },
@@ -156,21 +189,49 @@
         latitudearr:'',
         longitudearr:'',
         adresse1:[],
-        adresse2:[]
+        adresse2:[],
+        datenow: '',
+        datecol:'',
+        dateliv:'',
+        datearr:''
         }
     },
     methods: {
       open (link) {
         this.$electron.shell.openExternal(link)
-      }
+      },
+      time() {
+  var self = this
+  this.datenow = moment().format('h:mm')
+
+  setInterval(self.time, 1000)
+},
+time2() {
+var self = this
+this.datecol = moment().add(3,'minutes').format('h:mm')
+
+},
+time3() {
+var self = this
+this.dateliv = moment().add(5,'minutes').format('h:mm')
+
+},
+time4() {
+var self = this
+this.datearr = moment().add(Math.trunc(this.info.time/60),'minutes').format('h:mm')
+
+}
 
 
     },
     mounted () {
+this.time();
+
       this.$http
         .get('/ride')
         .then(response => {
 this.info=response.data;
+
         this.main_path = response.data.itineraries[0].itinerary.map( point =>{
           return {lat: point.x, lng: point.y}
           })
@@ -195,6 +256,9 @@ this.info=response.data;
                         .catch(e => {
                         this.errors.push(e)
                       })
+                      this.time2();
+                      this.time3();
+                      this.time4();
 
        })
 
@@ -335,11 +399,11 @@ ul{
 
 
   }
-  label{
-  width: 84px;
-  height: 35px;
+  .resp{
+  width: 337px;
+  height: 15px;
   font-family: Raleway;
-  font-size: 30px;
+  font-size: 13px;
   font-weight: bold;
 
   color: #ffffff;
@@ -376,12 +440,21 @@ ul{
   border-radius: 50%;}
   h1{
   color:white;
+  width:245px;
+  height:36px;
+  font-family: Raleway;
+  font-size: 31px;
+  font-weight:bold;
   }
   h2{
   color:white;
 }
 h5{
   color:white;
+  width:77px;
+  height:10px;
+  font-family: Raleway;
+  font-size: 9px;
 }
 
 </style>

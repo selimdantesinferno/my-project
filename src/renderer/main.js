@@ -7,7 +7,9 @@ import store from './store'
 
 import * as VueGoogleMaps from 'vue2-google-maps'
 
+import moment from 'moment'
 
+Vue.prototype.moment = moment
 Vue.use(VueGoogleMaps, {
   load: {
     key: 'AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM',
