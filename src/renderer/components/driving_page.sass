@@ -1,0 +1,170 @@
+.content
+  display: flex
+  background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f)
+  height: 300px
+
+[class*="Column"]
+  height: 100%
+  width: 100px
+  margin: auto
+  flex: 2 1 auto
+
+/*Travel column*/
+.travelColumn
+  flex: 1 1 15%
+  display: flex
+  justify-content: space-around
+  flex-flow: column nowrap
+  position: relative
+  .line
+    height: 76%
+    width: 2px
+    background-image: linear-gradient(to top, transparent 50%, #223049 50%), linear-gradient(to top, #00acd7, #43debd)
+    background-size: 1px 6px, 100% 100%
+    border: none
+    border-radius: 70%
+    position: absolute
+    left: 35.2%
+
+  .travelPoint
+    flex: 0 1 15%
+    display: flex
+    justify-content: center
+    z-index: 1
+    .icon
+      flex: 0 1 11%
+      display: flex
+      img
+        margin: auto
+        height: 40%
+    .point
+      display: flex
+      flex: 0 1 15%
+      .dot
+        border: 2px solid #43debd
+        border-radius: 50%
+        width: 40%
+        margin: auto
+        img.transp
+          display: block
+          height: auto
+          width: 100%
+    &.center .point .dot
+      background-color: white
+      border: none
+      border-radius: 50%
+      width: 25%
+    &.destination .point .dot
+      border: 2px solid #00acd7
+      .dotinside
+        background-color: #00acd7
+        border-radius: 50%
+        margin: 18%
+    .info
+      flex: 0 1 40%
+      font-size: 50%
+
+
+/*Address column*/
+.addressColumn
+  flex: 1 1 23%
+  .title h1
+    font-size: 1.5em
+    font-family: ralewaylight, Helvetica, Arial, sans-serif
+  .pathContainer
+    [class*="Address"]
+      display: flex
+      font-size: 90%
+      .icon
+        flex: 0 1 10%
+        display: flex
+        align-items: flex-end
+        justify-content: center
+        img
+          height: 28%;
+      .address
+        flex: 1 1 100%
+        .label
+          font-size: 55%;
+          margin-top: 7%;
+        .info
+          margin-top: 2%;
+          font-weight: bold;
+          display: inline-block;
+          border-bottom: 1px solid rgba(162, 162, 162, 0.51);
+    .destinationAddress
+      margin-top: 5%;
+  .addDestination
+    margin-top: 5%
+    font-size: 80%
+
+
+/* Map Column */
+.mapColumn
+  display: flex
+  flex: 1 1 30%
+  > *
+  .durationColumn
+    flex: 0 1 25%
+    text-align: right
+    .value
+      display: flex
+      align-items: baseline
+      justify-content: flex-end;
+      .number 
+        font-size: 2em
+        font-weight: bold
+        margin-right: 5%
+
+  .mapContainerColumn
+    flex: 0 1 90%
+    display: flex
+
+    .stroke1
+      width: 100%
+      height: auto
+      border: solid 1px #ffffff
+      border-radius: 43%
+      margin: auto
+      display: inline-table
+
+      .slime
+        width: 95%
+        background-image: linear-gradient(116deg, #9007c5, #00acd6 22%, #42ddbc 81%)
+        border-radius: 42%
+        margin-left: 3%
+
+        .slime1
+          width: 92%
+          transform: rotate(-293deg)
+          background-image: linear-gradient(#9007c5, #00acd6 35%, #42ddbc 80%)
+          border-radius: 40%
+          display: inline-block
+          margin-left: 4%
+          margin-top: -1%
+
+          .stroke
+            width: 111%
+            transform: rotate(250deg)
+            border: solid 0.5px #ffffff
+            border-radius: 44%
+            margin-left: -4%
+            margin-top: -1%
+            > img.transp
+              display: block
+              height: auto
+              width: 100%
+
+  .distanceColumn 
+    flex: 0 1 25%
+    .value
+      display: flex
+      align-items: baseline
+      .number
+        font-size: 2em              
+        font-weight: bold
+        margin-right: 5%
+
+
+.buttonColumn
+  flex: 1 1 35%

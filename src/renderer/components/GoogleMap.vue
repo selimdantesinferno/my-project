@@ -4,7 +4,6 @@
     <gmap-map
       :center="center"
       :zoom="13.5"
-      disableDefaultUI="true"
       v-bind:options="mapStyle"
       >
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
@@ -16,13 +15,12 @@
 
 <style>
 .googleMap {
-  width: 2000%;
-  height: 53%;
+  width: 2600%;
+  height: 84%;
   display: grid;
-  top: 23%;
-  left: -97%;
+  left: -97.7%;
+  margin: auto;
   position: relative;
-
 }
 
 .googleMap .vue-map-container .vue-map {
@@ -38,6 +36,8 @@ export default {
       info: [],
       center: { lat: 48.8739399, lng: 2.2946627},
       main_path: [],
+
+      // disableDefaultUI: true,
       markers: [],
       places: [],
       currentPlace: null,
