@@ -1,10 +1,10 @@
 <template>
-  <div>
-
-    <main>
+  <div class>
 
 
-      <div class="right-side">
+
+
+
 
       <table class="table1" width="100%" height="100%">
         <tr>
@@ -94,7 +94,7 @@
         <span class="dot2"></span>
         <br>
         <span class="dot2"></span>
-        <br>
+        <br><br>
       <h5>Adresse de destination</h5>
 <br>
       <svg xmlns="http://www.w3.org/2000/svg" width="17" height="23" viewBox="0 0 17 23">
@@ -122,7 +122,7 @@
               <div class="stroke">
                 <div class="slime">
         <div class="slime1">
-      <google-map class="ellipse" />
+      <google-map class=google-map></google-map>
         </div>
         </div></div></div></td>
               <td><h2 class="dure">Distance</h2>
@@ -161,6 +161,12 @@
     <tr>
       <td><label class="resp">Mode autonome</label></td>
       <td><label class="resp">Mode manuel</label></td></tr>
+      <tr>
+      <td>
+ <router-link to="/menu1">menu1</router-link>
+
+      </td>
+      </tr>
       </table>
 </td>
 </tr>
@@ -168,7 +174,7 @@
         </div>
 
 
-    </main>
+
   </div>
 </template>
 
@@ -177,6 +183,9 @@
   import GoogleMap from './GoogleMap'
   import axios from 'axios'
   import moment from 'moment'
+
+
+
   export default {
     name: 'landing-page',
     components: { GoogleMap },
@@ -260,6 +269,7 @@ this.info=response.data;
                       this.time3();
                       this.time4();
 
+
        })
 
 
@@ -275,186 +285,6 @@ this.info=response.data;
 
 
 <style scoped>
-  @import url('https://fonts.googleapis.com/css?family=Source+Sans+Pro');
 
-  * {
-
-
-    margin: 0;
-    padding: 0;
-    background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f);
-}
-.table1{
-width: 1920px;
-height: 388px;
-background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f);
-}
-.td1{
-width: 264px;
-height: 388px;
-background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f);
-}
-.td2{
-width: 384px;
-height: 388px;
-background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f);
-}
-.dot1 {
-  height: 25px;
-  width: 25px;
-  border:2px solid #43debd;
-  border-radius: 50%;
-  display: inline-block;
-}
-ul{
-  list-style-type: none;
-  margin: 0;
-  padding: 0;
-}
-.vl {
-  border-left: 6px solid green;
-  height: 500px;
-}
-.start {
-  width: 10px;
-  height: 22px;
-  object-fit: contain;
-}
-.colis {
-  width: 20px;
-  height: 22px;
-  object-fit: contain;
-}
-.colis-ok {
-  width: 29px;
-  height: 27px;
-  object-fit: contain;
-}
-.pinmap {
-  width: 15px;
-  height: 21px;
-  object-fit: contain;
-
-}
-.Line-2 {
-  border-left-width: 3px;
-  height: 295px;
-  border-left-style: dotted;
-  border-image-source: linear-gradient(to bottom, #42ddbc, #00acd6);
-  border-image-slice: 1;
-}
-.Fill-340 {
-  width: 9px;
-  height: 9px;
-  background-color: #ffffff;
-}
-.dot2{
-    height: 5px;
-    width: 5px;
-    border-radius: 50%;
-    background-color: #ffffff;
-    display: inline-block;
-    }
-
-  .dure {
-    width: 42px;
-    height: 18px;
-    font-family: Raleway;
-    font-size: 15px;
-    font-weight: 300;
-    font-style: normal;
-    font-stretch: normal;
-    line-height: normal;
-    letter-spacing: normal;
-    text-align: right;
-    color: #ffffff;
-  }
-  .min {
-    width: 84px;
-    height: 35px;
-    font-family: Raleway;
-    font-size: 20px;
-    font-weight: 300;
-    font-style: normal;
-    font-stretch: normal;
-    line-height: normal;
-    letter-spacing: normal;
-    text-align: right;
-    color: #ffffff;
-
-  }
-
-  .time {
-    font-size: 30px;
-    font-weight: bold;
-    color: #ffffff;
-  }
-  .slime {
-
-    width: 306px;
-    height: 306px;
-    background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9007c5);
-    background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9922cc);
-    border-radius: 50%;
-
-
-  }
-  .resp{
-  width: 337px;
-  height: 15px;
-  font-family: Raleway;
-  font-size: 13px;
-  font-weight: bold;
-
-  color: #ffffff;
-  }
-  .slime1 {
-
-    width: 306px;
-    height: 306px;
-    transform: rotate(-135deg);
-    background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9007c5);
-    background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9922cc);
-    border-radius: 50%;
-
-  }
-  .stroke {
-    width: 309px;
-    height: 325px;
-    transform: rotate(-75deg);
-    border: solid 0.5px #ffffff;
-    border-radius: 50%;
-  }
-  .stroke1 {
-    width: 309px;
-    height: 325px;
-    border: solid 0.5px #ffffff;
-    border-radius: 50%;
-  }
-  .ellipse {
-
-  width:287px;
-  height:287px;
-  transform: rotate(-150deg);
-  align-items: center;
-  border-radius: 50%;}
-  h1{
-  color:white;
-  width:245px;
-  height:36px;
-  font-family: Raleway;
-  font-size: 31px;
-  font-weight:bold;
-  }
-  h2{
-  color:white;
-}
-h5{
-  color:white;
-  width:77px;
-  height:10px;
-  font-family: Raleway;
-  font-size: 9px;
-}
 
 </style>

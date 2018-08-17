@@ -5,7 +5,8 @@
       :center="center"
       :zoom="13.5"
       v-bind:options="mapStyle"
-      style="width:287px;height:287px;">
+      style="width:287px;height:287px;"
+      class="ell">
 
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" :options="{strokeColor:'#00acd6'
 }" ref="polyline">
