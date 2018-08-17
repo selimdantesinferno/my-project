@@ -4,6 +4,8 @@ import axios from 'axios'
 import App from './App'
 import router from './router'
 import store from './store'
+import './fonts/fonts.css'
+import './styles/styles.css'
 
 import * as VueGoogleMaps from 'vue2-google-maps'
 
