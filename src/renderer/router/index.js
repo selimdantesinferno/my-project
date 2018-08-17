@@ -9,12 +9,7 @@ export default new Router({
       path: '/',
       name: 'driving-page',
       component: require('@/components/DrivingPage').default
-    },
-     {
-      path: '/test',
-      name: 'old',
-      component: require('@/components/itinerary').default
-    },
+    },    
     {
       path: '*',
       redirect: '/'

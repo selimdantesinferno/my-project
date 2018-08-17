@@ -5,39 +5,55 @@
     <div class="travelColumn">
       <div class="travelPoint">
         <div class="icon">
-          <img src="../assets/start.svg" class="start">
+          <img src="static/icons/start.svg" class="start">
         </div>
         <div class="point">
-          <div class="dot"></div>
+          <div class="dot">
+                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+          </div>
         </div>
         <div class="info">Depart <br> <b>16:22</b> </div>
       </div>
       <div class="travelPoint center">
         <div class="icon">
-          <img src="../assets/colis.svg" class="colis">
+          <img src="static/icons/colis.svg" class="colis">
         </div>
         <div class="point">
-          <div class="dot"></div>
+          <div class="dot">
+                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+          </div>
         </div>
-        <div class="info"></div>
+        <div class="info">
+          Pris en charge colis de <b>Agathe</b> <br> <b>16:28</b> 
+        </div>
       </div>
       <div class="travelPoint center">
         <div class="icon">
-          <img src="../assets/colis_ok.svg" class="colis-ok">
+          <img src="static/icons/colis_ok.svg" class="colis-ok">
         </div>
         <div class="point">
-          <div class="dot"></div>
+          <div class="dot">
+                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+          </div>
         </div>
-        <div class="info"></div>
+        <div class="info">
+          Livraison colis de <b>Agathe à Francois</b> <br> <b>16:37</b> 
+        </div>
       </div>
       <div class="travelPoint destination">
         <div class="icon">
-          <img src="../assets/pin_map.svg" class="pinmap">
+          <img src="static/icons/pin_map.svg" class="pinmap">
         </div>
         <div class="point">
-          <div class="dot"></div>
+          <div class="dot">
+            <div class="dotinside">
+                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+            </div>
+          </div>
         </div>
-        <div class="info"></div>
+        <div class="info">
+          Arrivée à destination<br> <b>16:42</b> 
+        </div>
       </div>
       <div class="line"></div>      
     </div>
@@ -46,7 +62,40 @@
 
 
 
-    <div class="addressColumn"></div>
+    <div class="addressColumn">
+      <div class="title"><h1>Votre trajet Clara</h1></div>
+      <div class="pathContainer">
+        <div class="originAddress">
+          <div class="icon">
+            <img src="static/icons/start.svg" class="start">
+          </div>
+          <div class="address">
+            <div class="label">Adresse de départ</div>
+            <div class="info">96 Avenue Charles de Gaulle, 75015 Paris</div>
+          </div>
+        </div>
+        <div class="destinationAddress">
+          <div class="icon">
+            <img src="static/icons/pin_map.svg" class="pinmap">
+          </div>
+          <div class="address">
+            <div class="label">Adresse de destination</div>
+            <div class="info">2 Place de la porte de versailles, 75015 Paris</div>
+          </div>
+        </div>
+      </div>
+      <div class="addDestination">
+        <div class="icon"></div>
+        <div class="label">Ajouter un destination</div>
+      </div>
+      <div class="paymentInfo">
+        <div class="label"></div>
+        <div class="info"></div>
+      </div>
+    </div>
+   
+
+
     <div class="mapColumn">
       <div class="durationColumn">
         <div class="label">Durée</div>
@@ -132,36 +181,35 @@
   height: 100%;
   width: 100px;
   margin: auto;
-  flex: 1 100%;
+  flex: 2 1 auto;
 }
 
 /*travel column*/
 
 .travelColumn {
   border: 1px solid red;
-  flex: 0 1 75%;
+  flex: 1 1 auto;
   display: flex;
-  flex-direction: column;
   justify-content: space-around;
-  flex-wrap: wrap;
+  flex-flow: column nowrap;
   position: relative;
 }
 
 .travelColumn .line {
   height: 76%;
-  width: 4px;
+  width: 2px;
   background-image: linear-gradient(to top, transparent 50%, #223049 50%), linear-gradient(to top, #00acd7, #43debd);
   background-size: 1px 8px, 100% 100%;
   border: none;
   border-radius: 70%;
   position: absolute;
-  left: 34.7%;
+  left: 35.2%;
 }
 
 .travelPoint {
     flex: 0 1 15%;
     display: flex;
-    justify-content: space-around;
+    justify-content: center;
     z-index: 1;
 }
 
@@ -171,6 +219,7 @@
 }
 .travelPoint .icon img {
   margin: auto;
+  height: 40%;
 }
 
 .travelPoint .point {
@@ -179,12 +228,12 @@
 }
 .travelPoint .info {
   flex: 0 1 40%;
+  font-size: 50%;
 }
 
 .travelPoint .point .dot {
     border: 2px solid #43debd;
-    border-radius: 50%;
-    height: 40%;
+    border-radius: 50%;    
     width: 40%;
     margin: auto;
 }
@@ -193,15 +242,38 @@
     background-color: white;    
     border: none;
     border-radius: 50%;
-    height: 30%;
-    width: 30%;
+    width: 25%;
 }
 
 .travelPoint.destination .point .dot {
     border: 2px solid #00acd7;    
 }
 
+.travelPoint.destination .point .dot .dotinside {
+    background-color: #00acd7;
+    border-radius: 50%;
+    margin: 18%;
+}
 
+
+/*Address column*/
+
+.addressColumn .title h1 {
+  font-size: 1.5em;
+  font-family: ralewaylight, Helvetica, Arial, sans-serif;    
+}
+
+.addressColumn .pathContainer [class*="Address"] {
+    display: flex;
+}
+
+.addressColumn .pathContainer [class*="Address"] > .icon {
+    flex: 0 1 10%;
+}
+
+.addressColumn .pathContainer [class*="Address"] > .address {
+    flex: 1 1 100%;
+}
 
 
 
