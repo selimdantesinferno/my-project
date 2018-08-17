@@ -4,24 +4,38 @@
     <gmap-map
       :center="center"
       :zoom="13.5"
+      disableDefaultUI="true"
       v-bind:options="mapStyle"
-      style="width:287px;height:287px;">
-
+      >
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
-
       </gmap-polyline>
     </gmap-map>
   </div>
 </template>
 
-<script>
 
+<style>
+.googleMap {
+  width: 2000%;
+  height: 53%;
+  display: grid;
+  top: 23%;
+  left: -97%;
+  position: relative;
+
+}
+
+.googleMap .vue-map-container .vue-map {
+  border-radius: 50%;
+}
+</style>
+
+<script>
 export default {
   name: 'GoogleMap',
   data () {
     return {
       info: [],
-
       center: { lat: 48.8739399, lng: 2.2946627},
       main_path: [],
       markers: [],

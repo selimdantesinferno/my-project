@@ -11,5 +11,7 @@
 </script>
 
 <style>
-
+html {
+	color: white
+}
 </style>
