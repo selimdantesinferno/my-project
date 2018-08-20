@@ -149,7 +149,7 @@
               <img src="static/icons/car.svg" class="image">                
             </div>
           </div>
-          <div class="text"></div>
+          <div class="text">Mode autonome</div>
         </div>
         <div class="button manual">
           <div class="rounded">
@@ -158,7 +158,7 @@
               <img src="static/icons/ba_v.svg" class="image">                
             </div>
           </div>
-          <div class="text"></div>
+          <div class="text">Mode manuel</div>
         </div>
 
       </div>

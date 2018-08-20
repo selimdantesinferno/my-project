@@ -205,9 +205,15 @@ img.transp
     display: flex
     justify-content: center
     .button
-      width: 18%
+      width: 19%
+      display: flex
+      flex-direction: column
+      justify-content: center
+      align-items: center
       .rounded
         border: 1px solid gray
+        width: 80%
+        margin-bottom: 8%
         .icon
           position: relative
           img.image
@@ -216,6 +222,11 @@ img.transp
             left: 25%
             width: 56%
             border-radius: 0
+
+      .text
+        text-align: center
+        font-size: 75%
+
 
       &:first-child
         margin-right: 12%
@@ -233,6 +244,18 @@ img.transp
       *
         border-radius: 50%
 
+  .goButton
+    text-align: center
 
-
-
+    a.button 
+      width: 102%
+      height: 20%
+      display: inline
+      padding: 4% 19%
+      color: white
+      text-decoration: none
+      font-family: ralewayregular, Helvetica, Arial, sans-serif
+      font-weight: bold
+      font-size: 120%
+      border-radius: 35px
+      background-image: linear-gradient(to right, #00acd6, #42ddbc)
