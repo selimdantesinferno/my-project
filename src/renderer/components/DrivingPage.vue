@@ -107,6 +107,7 @@
         </div>
       </div>
       <div class="mapContainerColumn">        
+        <google-map class="googleMap" />
         <div class="stroke1">
           <div class="slime">
             <div class="slime1">
@@ -116,7 +117,7 @@
             </div>
           </div>
         </div>
-        <google-map class="googleMap" />
+        
       </div>
       <div class="distanceColumn">
         <div class="distance">
