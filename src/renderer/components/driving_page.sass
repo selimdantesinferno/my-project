@@ -1,13 +1,18 @@
 .content
-  display: flex
-  background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f)
-  height: 300px
+  display: flex;
+  height: 288px;
+  position: fixed;
+  width: 100%;
 
 [class*="Column"]
   height: 100%
   width: 100px
   margin: auto
   flex: 2 1 auto
+
+img.transp
+  display: block
+  width: 100%
 
 /*Travel column*/
 .travelColumn
@@ -45,10 +50,7 @@
         border-radius: 50%
         width: 40%
         margin: auto
-        img.transp
-          display: block
-          height: auto
-          width: 100%
+        
     &.center .point .dot
       background-color: white
       border: none
@@ -67,7 +69,7 @@
 
 /*Address column*/
 .addressColumn
-  flex: 1 1 23%
+  flex: 1 1 22%
   .title h1
     font-size: 1.5em
     font-family: ralewaylight, Helvetica, Arial, sans-serif
@@ -102,26 +104,28 @@
 /* Map Column */
 .mapColumn
   display: flex
-  flex: 1 1 30%
+  flex: 1 1 38%
   > *
   .durationColumn
-    flex: 0 1 25%
+    flex: 0 1 20%
     text-align: right
-    .value
-      display: flex
-      align-items: baseline
-      justify-content: flex-end;
-      .number 
-        font-size: 2em
-        font-weight: bold
-        margin-right: 5%
+    .duration
+      margin-top: 25%
+      .value
+        display: flex
+        align-items: baseline
+        justify-content: flex-end;
+        .number 
+          font-size: 2em
+          font-weight: bold
+          margin-right: 5%
 
   .mapContainerColumn
-    flex: 0 1 90%
+    flex: 0 1 80%
     display: flex
 
     .stroke1
-      width: 100%
+      width: 94%
       height: auto
       border: solid 1px #ffffff
       border-radius: 43%
@@ -149,22 +153,87 @@
             border: solid 0.5px #ffffff
             border-radius: 44%
             margin-left: -4%
-            margin-top: -1%
-            > img.transp
-              display: block
-              height: auto
-              width: 100%
+            margin-top: -1%            
 
   .distanceColumn 
-    flex: 0 1 25%
-    .value
+    flex: 0 1 42%
+    display: flex
+    flex-direction: column
+    justify-content: space-between
+    .distance
+      margin-top: 11%;
+      .value
+        display: flex
+        align-items: baseline
+        .number
+          font-size: 2em              
+          font-weight: bold
+          margin-right: 5%
+
+    .footprint
       display: flex
-      align-items: baseline
-      .number
-        font-size: 2em              
-        font-weight: bold
-        margin-right: 5%
+      flex-direction: column
+      margin-bottom: 15%
+      .text
+        font-size: 81%
+      .info
+        display: flex
+        justify-content: flex-start
+        align-items: baseline
+        .number
+          font-size: 183%
+          font-weight: bold
+          margin-right: 4%
+        .unit
+          font-size: 114%
+          margin-right: 7%
+        .icon 
+          font-size: 81%
+          img
+            width: 40%
+
+
+
 
 
 .buttonColumn
-  flex: 1 1 35%
+  flex: 1 1 32%
+  display: flex
+  flex-direction: column
+  justify-content: space-around
+  margin-right: 5%
+  .modeButtons 
+    display: flex
+    justify-content: center
+    .button
+      width: 18%
+      .rounded
+        border: 1px solid gray
+        .icon
+          position: relative
+          img.image
+            position: absolute
+            top: 18%
+            left: 25%
+            width: 56%
+            border-radius: 0
+
+      &:first-child
+        margin-right: 12%
+
+      &.manual
+        img.image
+          width: 43%
+          top: 27%
+          left: 28%
+
+      &.active
+        .icon
+          background-image: linear-gradient(to right, #00acd6, #42ddbc)
+
+      *
+        border-radius: 50%
+
+
+
+

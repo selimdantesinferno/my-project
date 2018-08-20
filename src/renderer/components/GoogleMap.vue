@@ -15,12 +15,12 @@
 
 <style>
 .googleMap {
-  width: 2600%;
+  width: 900%;
   height: 84%;
   display: grid;
-  left: -97.7%;
+  left: -92%;
   margin: auto;
-  position: relative;
+  position: relative
 }
 
 .googleMap .vue-map-container .vue-map {

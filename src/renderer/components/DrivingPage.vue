@@ -9,7 +9,7 @@
         </div>
         <div class="point">
           <div class="dot">
-                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+            <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
           </div>
         </div>
         <div class="info">Depart <br> <b>16:22</b> </div>
@@ -20,7 +20,7 @@
         </div>
         <div class="point">
           <div class="dot">
-                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+            <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
           </div>
         </div>
         <div class="info">
@@ -33,7 +33,7 @@
         </div>
         <div class="point">
           <div class="dot">
-                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+            <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
           </div>
         </div>
         <div class="info">
@@ -98,10 +98,12 @@
 
     <div class="mapColumn">
       <div class="durationColumn">
-        <div class="label">Durée</div>
-        <div class="value">
-          <div class="number">20</div>
-          <div class="unit">min</div>
+        <div class="duration">
+          <div class="label">Durée</div>
+          <div class="value">
+            <div class="number">20</div>
+            <div class="unit">min</div>
+          </div>
         </div>
       </div>
       <div class="mapContainerColumn">        
@@ -117,15 +119,56 @@
         <google-map class="googleMap" />
       </div>
       <div class="distanceColumn">
-        <div class="label">Distance</div>
-        <div class="value">
-          <div class="number">4.6</div>
-          <div class="unit">Km</div>
+        <div class="distance">
+          <div class="label">Distance</div>
+          <div class="value">
+            <div class="number">4.6</div>
+            <div class="unit">Km</div>
+          </div>
+        </div>
+        <div class="footprint">
+          <div class="text">Ce trajet vous permet d'économiser</div>
+          <div class="info">
+            <div class="number">15</div>
+            <div class="unit">g CO2</div>
+            <div class="icon">
+              <img src="static/icons/leaf.png">              
+            </div>
+          </div>
         </div>
       </div>
-      
     </div>
-    <div class="buttonColumn"></div>
+
+    <div class="buttonColumn">
+      <div class="modeButtons">
+        <div class="button auto active">
+          <div class="rounded">
+            <div class="icon">
+              <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+              <img src="static/icons/car.svg" class="image">                
+            </div>
+          </div>
+          <div class="text"></div>
+        </div>
+        <div class="button manual">
+          <div class="rounded">
+            <div class="icon">
+              <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+              <img src="static/icons/ba_v.svg" class="image">                
+            </div>
+          </div>
+          <div class="text"></div>
+        </div>
+
+      </div>
+      <div class="goButton">
+        <a href="" class="button">C'est parti !</a>
+      </div>
+      <div class="acceptCheck">
+        <div class="icon"></div>
+        <div class="text">J’accèpte qu’on me propose la livraison de colis sur mon trajet  en échange d’une réduction de prix de ma course.</div>
+      </div>
+    </div>
   </div>
 
 </template>
