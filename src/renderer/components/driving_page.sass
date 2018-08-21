@@ -64,18 +64,25 @@ img.transp
         margin: 18%
     .info
       flex: 0 1 40%
-      font-size: 50%
+      font-size: 9px
+      display: flex
+      flex-direction: column
+      justify-content: center
+      b
+        font-size: 13px
 
 
 /*Address column*/
 .addressColumn
   flex: 1 1 22%
+  flex-direction: column
+  justify-content: space-between
+  display: flex
   .title h1
-    font-size: 1.5em    
+    font-size: 31px   
   .pathContainer
     [class*="Address"]
       display: flex
-      font-size: 90%
       .icon
         flex: 0 1 10%
         display: flex
@@ -86,24 +93,56 @@ img.transp
       .address
         flex: 1 1 100%
         .label
-          font-size: 55%;
+          font-size: 9px;
           margin-top: 7%;
         .info
           margin-top: 2%;
+          font-size: 13px
           font-weight: bold;
           display: inline-block;
           border-bottom: 1px solid rgba(162, 162, 162, 0.51);
+
     .destinationAddress
-      margin-top: 5%;
+      margin-top: 10%;
   .addDestination
-    margin-top: 5%
-    font-size: 80%
+    margin-top: 10%
+    display: flex
+    justify-content: center
+    .icon
+      flex: 1 1 10%
+      display: flex
+      img
+        height: 14px
+        margin: auto
+    .label
+      flex: 1 1 100%
+      font-size: 13px
+  .paymentInfo 
+    background: white
+    color: black
+    font-size: 9px
+    border-radius: 8px 8px 0 0
+    padding: 13px 17px 15px
+    font-weight: normal
+    display: flex
+    justify-content: space-between
+    .payment
+      flex: 1 1 40%
+    .price
+      flex: 1 1 70%
+    .info
+      font-weight: 600
+      font-size: 13px
+      margin-top: 5px
+
+    
 
 
 /* Map Column */
 .mapColumn
   display: flex
   flex: 1 1 38%
+  font-size: 15px
   > *
   .durationColumn
     flex: 0 1 20%
@@ -115,7 +154,7 @@ img.transp
         align-items: baseline
         justify-content: flex-end;
         .number 
-          font-size: 2em
+          font-size: 30px                        
           font-weight: bold
           margin-right: 5%
 
@@ -167,7 +206,7 @@ img.transp
         display: flex
         align-items: baseline
         .number
-          font-size: 2em              
+          font-size: 30px              
           font-weight: bold
           margin-right: 5%
 
@@ -176,22 +215,20 @@ img.transp
       flex-direction: column
       margin-bottom: 15%
       .text
-        font-size: 81%
       .info
         display: flex
         justify-content: flex-start
         align-items: baseline
         .number
-          font-size: 183%
+          font-size: 30px                        
           font-weight: bold
           margin-right: 4%
         .unit
-          font-size: 114%
+          font-size: 20px
           margin-right: 7%
         .icon 
-          font-size: 81%
           img
-            width: 40%
+            width: 12px
 
 
 .buttonColumn
@@ -230,7 +267,7 @@ img.transp
       &:first-child
         margin-right: 12%
 
-      &.manual
+      &.manual .rounded .icon
         img.image
           width: 43%
           top: 27%
@@ -246,14 +283,53 @@ img.transp
   .goButton
     text-align: center
 
-    a.button 
-      width: 102%
-      height: 20%
-      display: inline
-      padding: 4% 19%
-      color: white
-      text-decoration: none      
-      font-weight: bold
-      font-size: 120%
+    .stroke1
+      width: 323px
+      height: 69px
+      display: inline-block
+      border: 1px solid gray
       border-radius: 35px
-      background-image: linear-gradient(to right, #00acd6, #42ddbc)
+      padding-top: 3px
+
+      .stroke2
+        width: 97%
+        height: 99%
+        display: inline-block
+        border: 1px solid gray
+        border-radius: 32px
+        padding-top: 2px
+
+        a.button 
+          padding: 17px 81px
+          color: white
+          text-decoration: none
+          font-weight: 500
+          font-size: 24px
+          display: inline-block
+          border-radius: 35px
+          background-image: linear-gradient(to right, #00acd6, #42ddbc)
+
+  .acceptCheck
+    display: flex
+    justify-content: space-around
+    .icon
+      flex: 0 1 5%
+      justify-content: center
+      margin: 0 20px 0 95px
+      border-radius: 50%
+      .dot
+        height: 25px
+        width: 25px
+        border: 2px solid white
+        display: flex
+        border-radius: 50%
+        .dotinside
+          height: 19px
+          width: 19px
+          background-image: linear-gradient(to right, #00acd6, #42ddbc)
+          border-radius: 50%
+          margin: auto
+    .text
+      div
+        font-size: 12px
+        width: 85%

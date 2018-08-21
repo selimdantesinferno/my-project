@@ -12,7 +12,7 @@
             <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
           </div>
         </div>
-        <div class="info">Depart <br> <b>16:22</b> </div>
+        <div class="info">Depart <b>16:22</b> </div>
       </div>
       <div class="travelPoint center">
         <div class="icon">
@@ -24,7 +24,7 @@
           </div>
         </div>
         <div class="info">
-          Pris en charge colis de <b>Agathe</b> <br> <b>16:28</b> 
+          Pris en charge colis de <strong>Agathe</strong> <b>16:28</b> 
         </div>
       </div>
       <div class="travelPoint center">
@@ -37,7 +37,7 @@
           </div>
         </div>
         <div class="info">
-          Livraison colis de <b>Agathe à Francois</b> <br> <b>16:37</b> 
+          Livraison colis de <strong>Agathe à Francois</strong><b>16:37</b> 
         </div>
       </div>
       <div class="travelPoint destination">
@@ -52,7 +52,7 @@
           </div>
         </div>
         <div class="info">
-          Arrivée à destination<br> <b>16:42</b> 
+          Arrivée à destination<b>16:42</b> 
         </div>
       </div>
       <div class="line"></div>      
@@ -85,12 +85,20 @@
         </div>
       </div>
       <div class="addDestination">
-        <div class="icon"></div>
+        <div class="icon">
+          <img src="static/icons/add.png">                        
+        </div>
         <div class="label">Ajouter un destination</div>
       </div>
       <div class="paymentInfo">
-        <div class="label"></div>
-        <div class="info"></div>
+        <div class="price">
+          <div class="label">Coût estimé de la course</div>
+          <div class="info">17,64 €</div>
+        </div>
+        <div class="payment">
+          <div class="label">Moyen de paiement</div>
+          <div class="info">Clara Hugon</div>
+        </div>
       </div>
     </div>
    
@@ -131,7 +139,7 @@
           <div class="text">Ce trajet vous permet d'économiser</div>
           <div class="info">
             <div class="number">15</div>
-            <div class="unit">g CO2</div>
+            <div class="unit">g Co2</div>
             <div class="icon">
               <img src="static/icons/leaf.png">              
             </div>
@@ -165,9 +173,15 @@
       <div class="goButton">
         <a href="" class="button">C'est parti !</a>
       </div>
-      <div class="acceptCheck">
-        <div class="icon"></div>
-        <div class="text">J’accèpte qu’on me propose la livraison de colis sur mon trajet  en échange d’une réduction de prix de ma course.</div>
+      <div class="acceptCheck">        
+        <div class="icon">
+          <div class="dot"><div class="dotinside"></div></div>
+        </div>
+        <div class="text">
+          <div>
+            J’accèpte qu’on me propose la livraison de colis sur mon trajet  en échange d’une réduction de prix de ma course.
+          </div>
+        </div>
       </div>
     </div>
   </div>
