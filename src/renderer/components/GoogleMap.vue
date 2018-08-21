@@ -3,7 +3,7 @@
 
     <gmap-map
       :center="center"
-      :zoom="13.5"
+      :zoom="13"
       v-bind:options="mapStyle"
       >
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
@@ -15,11 +15,11 @@
 
 <style>
 .googleMap {
-  width: 89%;
-  height: 84%;
+  width: 87%;
+  height: 77%;
   display: grid;
-  left: 5.5%;
-  top: 9%;
+  left: 6.5%;
+  top: 12%;
   position: absolute;
   z-index: 2;
 }

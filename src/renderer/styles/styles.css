@@ -1,26 +1,25 @@
 body {
-	font-family: ralewaylight, Helvetica, Arial, sans-serif;
-	font-size: 83%;
-	margin: 0;
-	width: 100%
-	/*width: 1920px;
-	height: 388px*/
+  font-family: raleway, Helvetica, Arial, sans-serif;
+  margin: 0;
+  width: 100%;
+  font-weight: 100;
+  /*width: 1920px;
+  height: 388px*/
+}
+h1 {
+  font-weight: normal;
+}
+strong {
+  font-weight: 500;
 }
 
-h1, strong {
-font-family: ralewaybold, Helvetica, Arial, sans-serif;
-}
-
+/*
 em, cite, blockquote {
-font-family: ralewayitalic, Helvetica, Arial, sans-serif;
-}
+font-style: italic}*/
 
 #background_video {
     position: fixed;
-   /* right: 0;
-    bottom: 0;
-    min-width: 100%; 
-    min-height: 100%;*/
+
     width: 100%;
 }
 
