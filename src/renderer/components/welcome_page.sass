@@ -1,0 +1,68 @@
+.content
+  display: flex;
+  height: 388px;
+  position: fixed;
+  width: 100%;
+  justify-content: center
+
+
+[class*="Column"]
+  margin: auto
+
+
+
+.centeredContent
+  display: flex
+
+  .avatarColumn
+    .avatarImage
+      position: relative
+      img.image
+        width: 284px
+        left: 9px
+        top: 11px
+        margin: auto
+        position: absolute
+        z-index: 2
+        border: 3px solid white
+        border-radius: 50%
+    
+    .stroke1
+      width: 93%
+      height: auto
+      border: solid 1px #ffffff
+      border-radius: 43%
+      margin: auto
+      -webkit-animation: myturn linear 15s infinite;
+      // display: inline-table
+
+      .slime
+        width: 95%
+        background-image: linear-gradient(19deg, #9007c5, #00acd6 22%, #42ddbc 81%)
+        border-radius: 42%
+        margin-left: 3%
+
+        .slime1
+          width: 92%
+          transform: rotate(-293deg)
+          background-image: linear-gradient(#9007c5, #00acd6 35%, #42ddbc 80%)
+          border-radius: 40%
+          display: inline-block
+          margin-left: 4%
+          margin-top: -1%
+
+          .stroke
+            width: 111%
+            transform: rotate(250deg)
+            border: solid 0.5px #ffffff
+            border-radius: 44%
+            margin-left: -4%
+            margin-top: -1%      
+            img.transp
+              display: block
+              width: 305px
+
+  .textColumn
+    font-size: 30px
+    margin-left: 45px
+    text-align: center

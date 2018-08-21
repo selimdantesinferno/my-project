@@ -6,10 +6,15 @@ Vue.use(Router)
 export default new Router({
   routes: [
     {
-      path: '/',
+      path: '/go',
       name: 'driving-page',
       component: require('@/components/DrivingPage').default
     },    
+    {
+      path: '/',
+      name: 'welcome-page',
+      component: require('@/components/WelcomePage').default
+    }, 
     {
       path: '*',
       redirect: '/'

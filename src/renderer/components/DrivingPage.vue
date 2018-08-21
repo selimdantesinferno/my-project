@@ -59,9 +59,6 @@
     </div>
 
 
-
-
-
     <div class="addressColumn">
       <div class="title"><h1>Votre trajet Clara</h1></div>
       <div class="pathContainer">
@@ -102,7 +99,6 @@
       </div>
     </div>
    
-
 
     <div class="mapColumn">
       <div class="durationColumn">
