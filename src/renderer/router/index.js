@@ -11,9 +11,14 @@ export default new Router({
       component: require('@/components/DrivingPage').default
     },    
     {
-      path: '/',
+      path: '/welcome',
       name: 'welcome-page',
       component: require('@/components/WelcomePage').default
+    }, 
+    {
+      path: '/',
+      name: 'start-page',
+      component: require('@/components/StartPage').default
     }, 
     {
       path: '*',
