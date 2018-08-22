@@ -1,2 +1,32 @@
-.probando
-  color: white
+/*******************************
+ ** MODAL AS LEFT/RIGHT SIDEBAR
+ ** Add "left" or "right" in modal parent div, after class="modal".
+ *******************************/
+
+.modal
+  &.left .modal-dialog
+    position: fixed
+    width: 675px
+    max-width: 800px
+    height: 100%
+    -webkit-transform: translate3d(0%, 0, 0)
+    -ms-transform: translate3d(0%, 0, 0)
+    -o-transform: translate3d(0%, 0, 0)
+    transform: translate3d(0%, 0, 0)
+  &.left .modal-content
+    height: 85%
+    overflow-y: auto
+  
+  &.left .modal-body
+    padding: 15px 15px 80px
+  
+  &.left.fade
+    .modal-dialog
+      left: -320px
+      -webkit-transition: opacity 0.3s linear, left 0.3s ease-out
+      -moz-transition: opacity 0.3s linear, left 0.3s ease-out
+      -o-transition: opacity 0.3s linear, left 0.3s ease-out
+      transition: opacity 0.3s linear, left 0.3s ease-out
+    &.show .modal-dialog
+      left: 0
+
