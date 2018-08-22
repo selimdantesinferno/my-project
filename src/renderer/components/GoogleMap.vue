@@ -23,7 +23,6 @@
   position: absolute;
   z-index: 2;
 }
-
 .googleMap .vue-map-container .vue-map {
   border-radius: 50%;
 }
@@ -37,7 +36,6 @@ export default {
       info: [],
       center: { lat: 48.8739399, lng: 2.2946627},
       main_path: [],
-
       // disableDefaultUI: true,
       markers: [],
       places: [],
@@ -275,28 +273,22 @@ export default {
       ]
       }
       ]}}},
-
   mounted () {
       this.$http
         .get('/ride')
         .then(response => {
-
           this.main_path = response.data.itineraries[0].itinerary.map( point =>{
             console.log(point)
             return {lat: point.x, lng: point.y}
-
           })
-
         })
         .catch(error => console.log(error))
       // latitude=this.info.itineraries[0].itinerary[0].x;
       // console.log(latitude);
       // this.geolocate()
   },
-
   methods: {
     // receives a place object via the autocomplete component
-
     geolocate: function () {
       navigator.geolocation.getCurrentPosition(position => {
         this.center = {
