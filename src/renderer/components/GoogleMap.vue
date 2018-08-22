@@ -3,7 +3,7 @@
 
     <gmap-map
       :center="center"
-      :zoom="13.5"
+      :zoom="13"
       v-bind:options="mapStyle"
       >
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
@@ -15,12 +15,13 @@
 
 <style>
 .googleMap {
-  width: 2600%;
-  height: 84%;
+  width: 90%;
+  height: 80%;
+  left: 5.1%;
+  top: 10%;
   display: grid;
-  left: -97.7%;
-  margin: auto;
-  position: relative;
+  position: absolute;
+  z-index: 2;
 }
 
 .googleMap .vue-map-container .vue-map {
