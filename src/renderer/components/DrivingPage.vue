@@ -167,7 +167,11 @@
 
       </div>
       <div class="goButton">
-        <a href="" class="button">C'est parti !</a>
+        <div class="stroke1">
+          <div class="stroke2">
+            <a href="" class="button">C'est parti !</a>            
+          </div>
+        </div>
       </div>
       <div class="acceptCheck">        
         <div class="icon">
