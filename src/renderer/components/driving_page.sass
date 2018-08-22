@@ -48,7 +48,7 @@ img.transp
       .dot
         border: 2px solid #43debd
         border-radius: 50%
-        width: 40%
+        width: 51%
         margin: auto
         
     &.center .point .dot
@@ -246,7 +246,7 @@ img.transp
       flex-direction: column
       justify-content: center
       align-items: center
-      .rounded
+      .roundedButton
         border: 1px solid gray
         width: 80%
         margin-bottom: 8%
@@ -267,7 +267,7 @@ img.transp
       &:first-child
         margin-right: 12%
 
-      &.manual .rounded .icon
+      &.manual .roundedButton .icon
         img.image
           width: 43%
           top: 27%
@@ -285,22 +285,24 @@ img.transp
 
     .stroke1
       width: 323px
-      height: 69px
+      height: 66px
       display: inline-block
       border: 1px solid gray
       border-radius: 35px
-      padding-top: 3px
+      padding-top: 1px
+      transform: rotate(-1deg)
 
       .stroke2
-        width: 97%
-        height: 99%
+        width: 98%
+        height: 100%
         display: inline-block
         border: 1px solid gray
         border-radius: 32px
         padding-top: 2px
+        transform: rotate(2deg)
 
         a.button 
-          padding: 17px 81px
+          padding: 10px 83px
           color: white
           text-decoration: none
           font-weight: 500
@@ -308,6 +310,7 @@ img.transp
           display: inline-block
           border-radius: 35px
           background-image: linear-gradient(to right, #00acd6, #42ddbc)
+          transform: rotate(-1deg)
 
   .acceptCheck
     display: flex
@@ -324,8 +327,8 @@ img.transp
         display: flex
         border-radius: 50%
         .dotinside
-          height: 19px
-          width: 19px
+          height: 15px
+          width: 15px
           background-image: linear-gradient(to right, #00acd6, #42ddbc)
           border-radius: 50%
           margin: auto
