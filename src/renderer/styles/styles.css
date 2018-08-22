@@ -3,8 +3,12 @@ body {
   margin: 0;
   width: 100%;
   font-weight: 100;
+<<<<<<< HEAD
   width: 1920px;
   height: 388px;
+=======
+  color: white;
+>>>>>>> 50c2517ead1d2446996ae2d7373bb1663d09446e
 }
 h1 {
   font-weight: normal;

@@ -1,6 +1,7 @@
 <template>
   <div class="content">
     <!-- <router-link to="/test">Go to test</router-link> -->
+    <popup-accept class="popupAccept" />
 
     <div class="travelColumn">
       <div class="travelPoint">
@@ -147,7 +148,7 @@
     <div class="buttonColumn">
       <div class="modeButtons">
         <div class="button auto active">
-          <div class="rounded">
+          <div class="roundedButton">
             <div class="icon">
               <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
               <img src="static/icons/car.svg" class="image">
@@ -156,7 +157,7 @@
           <div class="text">Mode autonome</div>
         </div>
         <div class="button manual">
-          <div class="rounded">
+          <div class="roundedButton">
             <div class="icon">
               <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
               <img src="static/icons/ba_v.svg" class="image">
@@ -167,12 +168,12 @@
 
       </div>
       <div class="goButton">
-           <div class="stroke1">
-             <div class="stroke2">
-               <a href="" class="button">C'est parti !</a>
-             </div>
-           </div>
-         </div>
+        <div class="stroke1">
+          <div class="stroke2">
+            <a href="" class="button">C'est parti !</a>
+          </div>
+        </div>
+      </div>
       <div class="acceptCheck">
         <div class="icon">
           <div class="dot"><div class="dotinside"></div></div>
@@ -190,11 +191,12 @@
 
 <script>
   import GoogleMap from './GoogleMap'
+  import popupAccept from './popupAccept'
   import axios from 'axios'
   import moment from 'moment'
   export default {
     name: 'driving-page',
-    components: { GoogleMap },
+    components: { GoogleMap, popupAccept },
     data () {
       return {
         info:[],

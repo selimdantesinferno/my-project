@@ -30,6 +30,12 @@
     name: 'popup-accept'
   }
 </script>
+<<<<<<< HEAD
 
 <style src="./popupAccept.sass" lang="sass">
+=======
+
+<style src="./popupAccept.sass" lang="sass">
+
+>>>>>>> 50c2517ead1d2446996ae2d7373bb1663d09446e
 </style>
