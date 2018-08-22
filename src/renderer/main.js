@@ -9,6 +9,14 @@ import './styles/styles.css'
 
 import * as VueGoogleMaps from 'vue2-google-maps'
 
+import moment from 'moment'
+import BootstrapVue from 'bootstrap-vue'
+import 'bootstrap/dist/css/bootstrap.css'
+import 'bootstrap-vue/dist/bootstrap-vue.css'
+
+Vue.prototype.moment = moment
+
+
 
 Vue.use(VueGoogleMaps, {
   load: {
@@ -16,7 +24,7 @@ Vue.use(VueGoogleMaps, {
 
   }
 })
-
+Vue.use(BootstrapVue);
 if (!process.env.IS_WEB) Vue.use(require('vue-electron'))
 // Vue.http = Vue.prototype.$http = axios
 Vue.http = Vue.prototype.$http = axios.create({

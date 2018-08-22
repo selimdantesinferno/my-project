@@ -1,4 +1,4 @@
-<template>	
+<template>
   <div id="app">
   	<video autoplay="" muted="" loop="" id="background_video">
 	  <source src="static/video/background_wave.mp4" type="video/mp4">
@@ -16,7 +16,8 @@
 </script>
 
 <style>
-html {
+body {
 	color: white
 }
+
 </style>

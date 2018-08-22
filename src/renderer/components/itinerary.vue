@@ -142,7 +142,6 @@
 
 
 <script>
-
   import GoogleMap from './GoogleMap'
   import axios from 'axios'
   export default {
@@ -153,7 +152,6 @@
         info:[],
         latitude:'',
         longitude:''
-
       }
     },
     methods: {
@@ -170,25 +168,18 @@
       axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitude + ',' + this.longitude + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
                 .then(response => {
                 console.log(response.data);
-
                 })
                 .catch(e => {
                 this.errors.push(e)
               })
-
-
     }
   }
 </script>
 
 
 <style scoped>
-
 @import url('https://fonts.googleapis.com/css?family=Source+Sans+Pro');
-
 * {
-
-
   margin: 0;
   padding: 0;
   background-image: radial-gradient(circle at 50% 50%, #0e121c, #15243f);
@@ -243,7 +234,6 @@ ul{
   width: 15px;
   height: 21px;
   object-fit: contain;
-
 }
 .Line-2 {
   border-left-width: 3px;
@@ -264,7 +254,6 @@ ul{
   background-color: #ffffff;
   display: inline-block;
 }
-
 .dure {
   width: 42px;
   height: 18px;
@@ -290,9 +279,7 @@ ul{
   letter-spacing: normal;
   text-align: right;
   color: #ffffff;
-
 }
-
 .time {
   font-size: 30px;
   font-weight: bold;
@@ -304,29 +291,22 @@ label{
   font-family: Raleway;
   font-size: 30px;
   font-weight: bold;
-
   color: #ffffff;
 }
 .slime {
-
   width: 306px;
   height: 306px;
   background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9007c5);
   background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9922cc);
   border-radius: 50%;
-
-
 }
-
 .slime1 {
-
   width: 306px;
   height: 306px;
   transform: rotate(-135deg);
   background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9007c5);
   background-image: linear-gradient(116deg, #42ddbc, #00acd6 50%, #9922cc);
   border-radius: 50%;
-
 }
 .stroke {
   width: 309px;
@@ -342,7 +322,6 @@ label{
   border-radius: 50%;
 }
 .ellipse {
-
   width:287px;
   height:287px;
   transform: rotate(-150deg);
@@ -357,5 +336,4 @@ label{
   h5{
     color:white;
   }
-
 </style>
