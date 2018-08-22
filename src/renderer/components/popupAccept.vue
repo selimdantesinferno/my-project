@@ -1,34 +1,32 @@
 <template>
   
+<div>
+  <!-- <b-btn v-b-modal.modal1>Launch demo modal</b-btn> -->
 
-  <div class="modal fade" data-show="true" id="exampleModal" tabindex="-1" role="dialog" aria-labelledby="exampleModalLabel" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title" id="exampleModalLabel">Modal title</h5>
-          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-            <span aria-hidden="true">&times;</span>
-          </button>
-        </div>
-        <div class="modal-body">
-          Text
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-          <button type="button" class="btn btn-primary">Save changes</button>
-        </div>
-      </div>
-    </div>
-  </div>
+  <!-- Modal Component -->
+  <b-modal ref="myModalRef" id="modalAccept" title="Bootstrap-Vue">
+    <p class="my-4">Hello from modal!</p>
+    <!-- <template slot="header">
+      <h1>Here might be a page title</h1>
+    </template> -->
+    
+  </b-modal>
 
+</div>
+  
 
 </template>
 
 <script>
-  import 'bootstrap/js/dist/alert';
+
   export default {
-    name: 'popup-accept'
+    name: 'popup-accept',
+    
+    mounted () {
+      // this.$refs.myModalRef.show()
+    }
   }
+  // $("#exampleModal").modal()
 </script>
  
 <style src="./popupAccept.sass" lang="sass">

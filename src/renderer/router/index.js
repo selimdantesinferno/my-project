@@ -17,6 +17,7 @@ export default new Router({
     }, 
     {
       path: '/start',
+      // path: '/',
       name: 'start-page',
       component: require('@/components/StartPage').default
     }, 

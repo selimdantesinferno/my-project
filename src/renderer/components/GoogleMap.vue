@@ -15,10 +15,10 @@
 
 <style>
 .googleMap {
-  width: 90%;
-  height: 80%;
-  left: 5.1%;
-  top: 10%;
+  width: 89%;
+  height: 78%;
+  left: 5.5%;
+  top: 11%;
   display: grid;
   position: absolute;
   z-index: 2;

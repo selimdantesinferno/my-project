@@ -1,8 +1,7 @@
 <template>
   <div class="content">
     <!-- <router-link to="/test">Go to test</router-link> -->
-    <popup-accept class="popupAccept" />
-    
+   
     <div class="travelColumn">
       <div class="travelPoint">
         <div class="icon">
@@ -170,7 +169,7 @@
       <div class="goButton">
         <div class="stroke1">
           <div class="stroke2">
-            <a href="" class="button">C'est parti !</a>            
+            <a  href="" class="button">C'est parti !</a>            
           </div>
         </div>
       </div>

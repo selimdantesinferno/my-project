@@ -2,6 +2,7 @@
   <div class="content">
     <!-- <router-link to="/test">Go to test</router-link> -->
     <div class="centeredContent">
+      <popup-accept class="popupAccept" />
       
       <div class="avatarColumn">
         <div class="avatarImage">
@@ -22,6 +23,7 @@
         <b>Reconnaisance faciale</b>   
         <br>
         en cours
+        <b-btn v-b-modal.modalAccept>GO</b-btn>
       </div>
 
     </div>
@@ -30,8 +32,12 @@
 </template>
 
 <script>
+  import popupAccept from './popupAccept'
+
   export default {
-    name: 'start-page'
+    name: 'start-page',
+    components: { popupAccept }
+
   }
 </script>
  
