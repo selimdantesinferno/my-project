@@ -53,8 +53,14 @@
   "dependencies": {
     "axios": "^0.16.1",
     "bootstrap-vue": "^2.0.0-rc.11",
+
+    "jquery": "^3.3.1",
+    "moment": "^2.22.2",
+    "popper.js": "^1.14.4",
+
     "moment": "^2.22.2",
     "sockjs-client": "^1.1.5",
+
     "vue": "^2.3.3",
     "vue-electron": "^1.0.6",
     "vue-router": "^2.5.3",
@@ -83,9 +89,11 @@
     "electron-devtools-installer": "^2.2.0",
     "extract-text-webpack-plugin": "^3.0.0",
     "file-loader": "^0.11.2",
-    "html-webpack-plugin": "^2.30.1",
+    "html-webpack-plugin": "^3.2.0",
     "multispinner": "^0.2.1",
     "node-loader": "^0.6.0",
+    "node-sass": "^4.9.3",
+    "sass-loader": "^7.1.0",
     "style-loader": "^0.18.2",
     "url-loader": "^0.5.9",
     "vue-html-loader": "^1.2.4",

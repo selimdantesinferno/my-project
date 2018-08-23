@@ -3,13 +3,18 @@
 
     <gmap-map
       :center="center"
-      :zoom="13.5"
+      :zoom="13"
       v-bind:options="mapStyle"
+
+      >
+      <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
+
       style="width:287px;height:287px;"
       class="ell">
 
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" :options="{strokeColor:'#00acd6'
 }" ref="polyline">
+
 
       </gmap-polyline>
 <gmap-marker></gmap-marker>
@@ -17,17 +22,36 @@
   </div>
 </template>
 
-<script>
 
+<style>
+.googleMap {
+  width: 89%;
+  height: 78%;
+  left: 5.5%;
+  top: 11%;
+  display: grid;
+  position: absolute;
+  z-index: 2;
+}
+.googleMap .vue-map-container .vue-map {
+  border-radius: 50%;
+}
+</style>
+
+<script>
 export default {
   name: 'GoogleMap',
   data () {
     return {
       info: [],
-
       center: { lat: 48.8739399, lng: 2.2946627},
       main_path: [],
+
+      // disableDefaultUI: true,
+      markers: [],
+
       markers:[],
+
       places: [],
       currentPlace: null,
       mapStyle:{styles:[
@@ -263,18 +287,14 @@ export default {
       ]
       }
       ]}}},
-
   mounted () {
       this.$http
         .get('/ride')
         .then(response => {
-
           this.main_path = response.data.itineraries[0].itinerary.map( point =>{
             console.log(point)
             return {lat: point.x, lng: point.y}
-
           })
-
 
         })
         .catch(error => console.log(error))
@@ -283,10 +303,17 @@ export default {
       // console.log(latitude);
       // this.geolocate()
   },
-
   methods: {
     // receives a place object via the autocomplete component
 
+    geolocate: function () {
+      navigator.geolocation.getCurrentPosition(position => {
+        this.center = {
+        lat: position.coords.latitude,
+        lng: position.coords.longitude
+        }
+      })
+    }
 
   }
 }

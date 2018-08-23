@@ -1,0 +1,29 @@
+body {
+  font-family: raleway, Helvetica, Arial, sans-serif;
+  margin: 0;
+  width: 100%;
+  font-weight: 100;
+  color: white;
+
+}
+h1 {
+  font-weight: normal;
+}
+strong, b {
+  font-weight: 500;
+}
+
+/*
+em, cite, blockquote {
+font-style: italic}*/
+
+#background_video {
+    position: fixed;
+    width: 1920px;
+    height:388px
+}
+
+@keyframes myturn {
+    0%   {transform: rotate(0deg) skewX(0deg);}
+    100% {transform: rotate(-360deg) skewX(0deg);}
+}
