@@ -2,15 +2,11 @@
 
   <div id="app">
   	<video autoplay="" muted="" loop="" id="background_video">
-	  <source src="static/video/background_wave.mp4" type="video/mp4">
-	</video>
+  	  <source src="static/video/background_wave.mp4" type="video/mp4">
+  	</video>
   	<div class="routerView">
   	  <router-view></router-view>
   	</div>
-
-  <div class="dim" id="app">
-
-    <router-view></router-view>
 
   </div>
 </template>

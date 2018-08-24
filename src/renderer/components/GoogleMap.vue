@@ -7,18 +7,15 @@
       v-bind:options="mapStyle"
 
       >
-      <gmap-polyline v-if="main_path.length > 0" :path="main_path" ref="polyline">
-
-      style="width:287px;height:287px;"
-      class="ell">
+   
 
       <gmap-polyline v-if="main_path.length > 0" :path="main_path" :options="{strokeColor:'#00acd6'
-}" ref="polyline">
+        }" ref="polyline">
 
 
       </gmap-polyline>
-<gmap-marker></gmap-marker>
-    </gmap-map>
+      <gmap-marker></gmap-marker>
+      </gmap-map>
   </div>
 </template>
 

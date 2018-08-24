@@ -23,7 +23,6 @@
         <b>Reconnaisance faciale</b>   
         <br>
         en cours
-        <b-btn v-b-modal.modalAccept>GO</b-btn>
       </div>
 
     </div>
