@@ -51,5 +51,5 @@
   }
 </script>
 
-<style src="./welcome_page.sass" lang="sass">
+<style scoped src="./welcome_page.sass" lang="sass">
 </style>

@@ -1,32 +1,169 @@
-/*******************************
+/******************************
  ** MODAL AS LEFT/RIGHT SIDEBAR
  ** Add "left" or "right" in modal parent div, after class="modal".
  *******************************/
 
 .modal
-  &.left .modal-dialog
-    position: fixed
-    width: 675px
-    max-width: 800px
-    height: 100%
-    -webkit-transform: translate3d(0%, 0, 0)
-    -ms-transform: translate3d(0%, 0, 0)
-    -o-transform: translate3d(0%, 0, 0)
-    transform: translate3d(0%, 0, 0)
-  &.left .modal-content
-    height: 85%
-    overflow-y: auto
-  
-  &.left .modal-body
-    padding: 15px 15px 80px
-  
-  &.left.fade
+  &.left
     .modal-dialog
-      left: -320px
-      -webkit-transition: opacity 0.3s linear, left 0.3s ease-out
-      -moz-transition: opacity 0.3s linear, left 0.3s ease-out
-      -o-transition: opacity 0.3s linear, left 0.3s ease-out
-      transition: opacity 0.3s linear, left 0.3s ease-out
-    &.show .modal-dialog
-      left: 0
+      position: fixed
+      width: 675px
+      max-width: 800px
+      height: 100%
+      -webkit-transform: translate3d(0%, 0, 0)
+      -ms-transform: translate3d(0%, 0, 0)
+      -o-transform: translate3d(0%, 0, 0)
+      transform: translate3d(0%, 0, 0)
+    .modal-content
+      height: 85%
+      overflow: initial
+      border-radius: 0 15px 15px 0;
+    
+    .modal-body
+      padding: 15px 15px 15px
+  
+    &.fade
+      .modal-dialog
+        left: -320px
+        -webkit-transition: opacity 0.3s linear, left 0.3s ease-out
+        -moz-transition: opacity 0.3s linear, left 0.3s ease-out
+        -o-transition: opacity 0.3s linear, left 0.3s ease-out
+        transition: opacity 0.3s linear, left 0.3s ease-out
+      &.show .modal-dialog
+        left: -1px
+
+  
+  
+    .content 
+      display: flex;
+      color: black
+      height: 298px;    
+
+      /* [class*="Column"]      
+        flex: 1 1 100% */
+
+      .textColumn
+        flex: 1 1 18%;
+        color: #003469;
+        font-size: 15px;
+        font-weight: 500;
+        margin-left: 13px;
+        .titre
+          margin-bottom: 28px;  
+          h2          
+            font-size: 26px;
+            font-weight: 400;
+        b 
+          font-weight: bold;
+      
+      .mapColumn
+        flex: 1 1 41%;
+        display: flex
+        position: relative
+        margin-right: 21px;
+        .stroke1
+          width: 208px;
+          height: 208px;
+          border: solid 2px #003469;
+          border-radius: 45%;
+          margin: auto;
+          -webkit-animation: turnleft linear 15s infinite;
+          .stroke
+            width: 101%;
+            transform: rotate(59deg);
+            border: solid 0.5px #003469;
+            border-radius: 39%;
+            margin-left: -1%;
+            margin-top: -1%;
+            height: 104%;
+            -webkit-animation: turnrigth linear 8s infinite;
+      .points
+        position: absolute;
+        display: flex;
+        width: 100%;
+        height: 100%;
+        flex-direction: column;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: bold;
+        padding: 13px;
+        font-size: 13px;
+        color: #003469;
+        .middle
+          display: flex;
+          width: 100%;
+          justify-content: space-between;
+    
+
+      .infoColumn  
+        flex: 1 1 15%;
+        margin-right: 58px;
+        font-size: 11px;
+        font-weight: 400;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-around;  
+        b
+          font-size: 22px;
+          font-weight: bold;
+        strong
+          font-size: 14px;
+          font-weight: 600;
+      
+      .buttonsContainer
+        position: absolute
+        right: -49px
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        top: 0;
+        justify-content: center;
+        align-items: center;
+    
+        button
+          border-radius: 50%;
+          border: none;
+        
+        .goButton
+          margin-bottom: 25px;
+          button
+            background-image: linear-gradient(45deg, #9007c5, #00acd6 58%, #42ddbc 80%);
+            width: 100px;
+            height: 100px;
+          img.img 
+            width: 35px
+
+        .cancelButton
+          button
+            background-color: #003469
+            width: 66px;
+            height: 66px;
+
+          img.img     
+            height: auto
+            width: 35px
+        
+
+
+.googleMap
+  // width: 194px;
+  // height: 194px;
+  left: 16.4%;
+  top: 17%;
+  position: absolute;
+  // z-index: 2;
+  // margin: auto;
+  .vue-map-container
+    // position: initial
+    .vue-map
+      border-radius: 50% 
+      height: 194px;
+      width: 194px;  
+/*   width: 100px;
+  height: 100px;
+  left: 5.5%;
+  /* top: 11%;
+  display: grid;
+  position: relative;
+  z-index: 2;*/
 

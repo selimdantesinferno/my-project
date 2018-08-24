@@ -13,21 +13,6 @@
 </template>
 
 
-<style>
-.googleMap {
-  width: 89%;
-  height: 78%;
-  left: 5.5%;
-  top: 11%;
-  display: grid;
-  position: absolute;
-  z-index: 2;
-}
-.googleMap .vue-map-container .vue-map {
-  border-radius: 50%;
-}
-</style>
-
 <script>
 export default {
   name: 'GoogleMap',

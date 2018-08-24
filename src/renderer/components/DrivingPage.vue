@@ -286,6 +286,6 @@ this.datearr = moment().add(Math.trunc(this.info.time/60),'minutes').format('h:m
   }
 </script>
 
- <style src="./driving_page.sass" lang="sass">
+ <style scoped src="./driving_page.sass" lang="sass">
 
  </style>

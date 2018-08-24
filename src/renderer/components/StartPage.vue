@@ -41,6 +41,6 @@
   }
 </script>
  
-<style src="./start_page.sass" lang="sass">
+<style scoped src="./start_page.sass" lang="sass">
 
 </style>
