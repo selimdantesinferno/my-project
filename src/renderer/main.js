@@ -24,7 +24,10 @@ Vue.use(VueGoogleMaps, {
   }
 })
 
+
 Vue.use(BootstrapVue);
+
+
 
 if (!process.env.IS_WEB) Vue.use(require('vue-electron'))
 // Vue.http = Vue.prototype.$http = axios
