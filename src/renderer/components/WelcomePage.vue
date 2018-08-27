@@ -31,14 +31,12 @@
 
 </template>
 
-<script>
-
-  
+<script>  
   export default {
     name: 'welcome-page'
   }
 </script>
  
-<style src="./welcome_page.sass" lang="sass">
+<style scope src="./welcome_page.sass" lang="sass">
 
 </style>

@@ -1,6 +1,8 @@
 <template>
-  <div class="content">
+  <div class="contentDriving">
     <!-- <router-link to="/test">Go to test</router-link> -->
+      <popup-accept class="popupAccept" />
+
     <div class="travelColumn">
       <div class="travelPoint">
         <div class="icon">
@@ -110,7 +112,7 @@
         </div>
       </div>
       <div class="mapContainerColumn">
-        <google-map class="googleMap" />
+        <google-map class="googleMapDriving" />
         <div class="stroke1">
           <div class="slime">
             <div class="slime1">
@@ -286,6 +288,6 @@ this.datearr = moment().add(Math.trunc(this.info.time/60),'minutes').format('h:m
   }
 </script>
 
- <style scoped src="./driving_page.sass" lang="sass">
+ <style src="./driving_page.sass" lang="sass">
 
  </style>

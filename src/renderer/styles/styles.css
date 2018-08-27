@@ -32,3 +32,9 @@ font-style: italic}*/
     0%   {transform: rotate(0deg) skewX(0deg);}
     100% {transform: rotate(360deg) skewX(0deg);}
 }
+
+@keyframes sizeBig {
+    0%   {border-radius: 45%}
+    50%   {border-radius: 35%}
+    100% {border-radius: 45%}
+}

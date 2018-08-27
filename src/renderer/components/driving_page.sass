@@ -1,4 +1,4 @@
-.content
+.contentDriving
   display: flex;
   height: 388px;
   position: fixed;
@@ -180,7 +180,7 @@ img.transp
       border: solid 1px #ffffff
       border-radius: 43%
       margin: auto
-      -webkit-animation: myturn linear 15s infinite;
+      -webkit-animation: turnrigth linear 15s infinite;
       // display: inline-table
 
       .slime
@@ -197,6 +197,7 @@ img.transp
           display: inline-block
           margin-left: 4%
           margin-top: -1%
+          -webkit-animation: turnleft linear 7s infinite, sizeBig linear 2s infinite;
 
           .stroke
             width: 111%
@@ -205,6 +206,19 @@ img.transp
             border-radius: 44%
             margin-left: -4%
             margin-top: -1%
+
+    .googleMapDriving
+      width: 290px;
+      height: 290px;
+      left: 8%;
+      top: 13%;
+      display: grid
+      position: absolute
+      z-index: 2
+      .vue-map-container
+        .vue-map
+          border-radius: 50%
+
 
   .distanceColumn
     flex: 0 1 42%
@@ -348,13 +362,3 @@ img.transp
         font-size: 12px
         width: 85%
 
-.googleMap
-  width: 89%
-  height: 78%
-  left: 5.5%
-  top: 11%
-  display: grid
-  position: absolute
-  z-index: 2
-  .vue-map-container .vue-map
-    border-radius: 50%
