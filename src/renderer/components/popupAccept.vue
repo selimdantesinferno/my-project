@@ -1,10 +1,8 @@
 <template>
     
   <div>
-    <!-- <b-btn v-b-modal.modal1>Launch demo modal</b-btn> -->
-
     <!-- Modal Component -->
-    <b-modal modal-class="left"
+    <b-modal modal-class="left popupAccept"
      v-model="modalShow" ref="popupAcceptRef" id="modalAccept" title="Bootstrap-Vue"
     :hide-header= "true"
     :hide-footer= "true"

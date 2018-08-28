@@ -4,8 +4,7 @@
  Nelson Ramirez
  *******************************/
 
-
-.modal.left.popupAccept
+.modal.left.popupStatus
   .modal-dialog
     position: fixed
     width: 675px
@@ -57,35 +56,12 @@
       display: flex
       position: relative
       margin-right: 21px;
-      .stroke1
-        width: 208px;
-        height: 208px;
-        border: solid 2px #003469;
-        border-radius: 45%;
-        margin: auto;
-        -webkit-animation: turnleft linear 15s infinite;
-        .stroke
-          width: 101%;
-          transform: rotate(59deg);
-          border: solid 0.5px #003469;
-          border-radius: 39%;
-          margin-left: -1%;
-          margin-top: -1%;
-          height: 104%;
-          -webkit-animation: turnrigth linear 8s infinite;
-      .googleMap
-        left: 16.4%;
-        top: 17%;
-        position: absolute;
+      .car
+        margin: auto
+        img
+          width: 208px
 
-        .vue-map-container
-          .vue-map
-            border-radius: 50% 
-            height: 194px;
-            width: 194px;  
-
-
-
+          
     .points
       position: absolute;
       display: flex;
@@ -134,7 +110,6 @@
         border: none;
       
       .goButton
-        margin-bottom: 25px;
         button
           background-image: linear-gradient(45deg, #9007c5, #00acd6 58%, #42ddbc 80%);
           width: 100px;

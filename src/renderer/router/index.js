@@ -26,7 +26,8 @@ export default new Router({
     {
       path: '*',
       redirect: '/'
-    },
+    }
+    ,
     {
        path: '/menu1',
        name: 'Menu1',

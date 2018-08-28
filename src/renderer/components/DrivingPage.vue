@@ -1,7 +1,9 @@
 <template>
   <div class="contentDriving">
-    <!-- <router-link to="/test">Go to test</router-link> -->
-      <popup-accept class="popupAccept" />
+    
+
+    <popup-status />
+    <!-- <popup-accept /> -->
 
     <div class="travelColumn">
       <div class="travelPoint">
@@ -192,11 +194,12 @@
 <script>
   import GoogleMap from './GoogleMap'
   import popupAccept from './popupAccept'
+  import popupStatus from './popupStatus'
   import axios from 'axios'
   import moment from 'moment'
   export default {
     name: 'driving-page',
-    components: { GoogleMap, popupAccept },
+    components: { GoogleMap, popupAccept, popupStatus },
     data () {
       return {
         info:[],
@@ -221,7 +224,7 @@
   var self = this
   this.datenow = moment().format('h:mm')
 
-  setInterval(self.time, 1000)
+  // setInterval(self.time, 1000)
 },
 time2() {
 var self = this
