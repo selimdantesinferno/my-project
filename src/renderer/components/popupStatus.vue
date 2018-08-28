@@ -15,18 +15,27 @@
         <div class="text">Le colis est chargé, nous pouvons  repartir quand vous le souhaitez.</div>
       </div>
       
-      <div class="mapColumn">
-        <div class="car">
-          <img src="static/images/car.png" class="img">                  
-        </div>
+      <div class="statusColumn">
+
         <div class="points">
-          <div class="north">N</div>
-          <div class="middle">
-            <div class="west">W</div>
-            <div class="east">E</div>
+          <div class="two">
+            <div class="left">Coffre Fermé</div>
+            <div class="rigth">Prêt à repartir</div>
           </div>
-          <div class="south">S</div>
+          <div class="one">Coffre ouvert</div>          
+          <div class="two">
+            <div class="left">Identification</div>
+            <div class="rigth">En attente de l'expediteur</div>
+          </div>
         </div>
+        <div class="line">
+          <div class="imgBorder">
+            <img src="static/images/car.png" class="img">
+          </div>
+          <div class="imgCut">
+            
+          </div>
+        </div>   
       </div>
 
       <div class="buttonsContainer">
