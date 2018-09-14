@@ -7,7 +7,7 @@ export default new Router({
   routes: [
     {
       path: '/go',
-      path: '/',
+      // path: '/',
       name: 'driving-page',
       component: require('@/components/DrivingPage').default
     },    
@@ -22,6 +22,12 @@ export default new Router({
       // path: '/',
       name: 'start-page',
       component: require('@/components/StartPage').default
+    }, 
+    {
+      path: '/',
+      // path: '/dms',
+      name: 'dms-page',
+      component: require('@/components/DMSPage').default
     }, 
     {
       path: '*',

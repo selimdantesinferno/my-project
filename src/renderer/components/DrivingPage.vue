@@ -2,8 +2,8 @@
   <div class="contentDriving">
     
 
-    <popup-status />
-    <!-- <popup-accept /> -->
+    <!-- <popup-status /> -->
+    <popup-accept />
 
     <div class="travelColumn">
       <div class="travelPoint">
