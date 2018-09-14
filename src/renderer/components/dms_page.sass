@@ -1,42 +1,52 @@
 .dmsPage
   font-size: 20px
   font-weight: 300
-  .logoBar
-    height: 27px
-    text-align: center
-    background: white
-    padding: 3px 0
-
-
-  .logoBar img
-    height: 100%
-    width: auto
-    vertical-align: initial
-
+  padding: 0
+  height: 388px
+  
   .detectionColumn
-    flex: 0 0 30.5%
-    .content img 
+    flex: 0 0 39.5%
+    border-right: 5px solid black
+    .content img.bordered
       border: 1px solid grey
       border-radius: 5px
       padding: 18px 10px
       width: 132px
       margin-top: 10px
 
-      &.head
-        width: 141px
-        padding: 8px 11px
       &.mouth
         padding: 18px 25px
 
     .movements
-      padding: 16px 0
       border-bottom: 5px solid black
-      .text
-        flex: 0 0 34%
+      .col
+        padding: 45px 0 15px 9px
+        &.logo
+          flex: 0 0 23%
+          background: white
+          padding: 25px
+          img
+            width: 100%
+        &.text
+          flex: 0 0 28%
+          font-size: 24px
+          border-left: 3px solid black
     
     .position
-      padding: 13px 0px
+      padding: 18px 0px
+
+      .text
+        flex: 0 0 32%
+        padding: 11px 0 0 15px
+        font-size: 24px
+      .headImage
+        flex: 0 0 38%
+        img.head
+          width: 156px
+          padding: 13px
+
       .coordinate
+        margin-top: 9px
         *
           display: inline-block
         .cercle
@@ -54,10 +64,124 @@
           margin-left: -18px
           font-size: 18px
           border-radius: 0 8px 8px
+          margin-right: 8px
       
 
   .videoColumn
-    flex: 0 0 23%
-    img.videoImage
-      height: 388px
+    flex: 0 0 14%
+    border-right: 5px solid black
+    
+    .video
+      padding: 31px 53px
+      border-bottom: 5px solid black
+      img
+        width: 100%
+
+    .coordinates
+      display: flex
+      justify-content: center
+      font-size: 18px
+
+      .coordinatesContent
+        display: flex
+        flex-direction: column
+        padding: 8px 0
+        > *
+          display: flex
+          justify-content: space-between
+
+          > *
+            flex: 0 0 35%
+
+          > :first-child
+            text-align: right
+
+          > :nth-child(2)
+            margin-left: 20px
+
+          span
+            font-size: 14px
+            border: 1px solid
+            border-radius: 5px
+            display: inline-block            
+            width: 56px
+            text-align: center
+
+
+  .statusColumn
+    .condition
+      flex: 0 0 65%
+      font-size: 24px
+      .titre
+        text-align: center
+        padding-top: 35px
+    
+      .feature
+        font-weight: 500
+        margin-bottom: 30px
+        .name
+          flex: 0 0 33%
+          text-align: right
+          padding-right: 35px
+        .bar
+          flex: 0 0 44%
+          padding: 10px 0 0
+          span.marker
+            height: 45px
+            width: 2px
+            background: white
+            display: inline-block
+            position: absolute
+            top: -1px
+            left: 35%
+          .progress
+            height: 20px
+            border-radius: 10px
+            margin: auto
+            .vert
+              background-color: #43debd
+            .jaune
+              background-color: #f77a0b
+            .rouge  
+              background-color: #ed1c24
+        .value
+          text-align: center
+
+    .logoBar
+      height: 112px
+      text-align: center
+      background: white
+      padding: 38px 75px
+      border-left: 2px solid black
+      img
+        width: 100%
+        height: auto
+
+    .constants
+      .content
+        padding: 20px 0 0 0
+        font-size: 24px
+        border-left: 5px solid black
+      .constantsBox
+        border: 1px solid #43debd
+        border-radius: 15px
+        font-size: 20px
+        font-weight: 500
+        padding: 10px 0
+        margin-top: 21px
+        width: 221px
+        .constant
+          margin-top: 23px
+          &:first-child
+            margin: 0          
+          .icon
+            flex: 0 0 45%
+            margin-right: 10px
+          .text
+            flex: 0 0 50%
+            text-align: left
+          img
+            height: 32px
+            
+
 

@@ -32,7 +32,7 @@ function createWindow () {
     autoHideMenuBar : true
   })
 
-  mainWindow.setSize (
+  mainWindow.setContentSize (
   //    x: 50, y: 50, 
     1920, 388
   )
