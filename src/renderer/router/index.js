@@ -30,6 +30,12 @@ export default new Router({
       component: require('@/components/DMSPage').default
     }, 
     {
+      // path: '/',
+      path: '/manual',
+      name: 'manual',
+      component: require('@/components/ManualPage').default
+    }, 
+    {
       path: '*',
       redirect: '/'
     }

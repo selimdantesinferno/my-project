@@ -149,6 +149,7 @@
 
     <div class="buttonColumn">
       <div class="modeButtons">
+
         <div class="button auto active">
           <div class="roundedButton">
             <div class="icon">
@@ -158,6 +159,7 @@
           </div>
           <div class="text">Mode autonome</div>
         </div>
+
         <div class="button manual">
           <div class="roundedButton">
             <div class="icon">
@@ -166,6 +168,17 @@
             </div>
           </div>
           <div class="text">Mode manuel</div>
+        </div>
+
+        <div class="button showroom">
+          <div class="roundedButton">
+            <div class="icon">
+              <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+              <img src="static/images/coeur.png" alt="" class="image">
+              
+            </div>
+          </div>
+          <div class="text">Showroom</div>
         </div>
 
       </div>

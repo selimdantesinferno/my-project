@@ -1,14 +1,17 @@
 <template>
  <div class="container-fluid dmsPage">
   <div class="row h-100 no-gutters">
+
+    <div class="col logoColumn">
+      <div class="align-items-center d-flex logo">
+        <img src="static/images/idemiaLogo.png" alt="">
+      </div>
+    </div>
+
     <div class="col detectionColumn">
       <div class="d-flex flex-column justify-content-center ">
-        
         <div class="content">
-          <div class="row no-gutters movements">
-            <div class="align-items-center col d-flex logo">
-              <img src="static/images/idemiaLogo.png" alt="">
-            </div>
+          <div class="row no-gutters movements">            
             <div class="col text">Face movements</div>
             
             <div class="col text-center">
@@ -25,10 +28,10 @@
             <div class="col text">
               Head Position
             </div>
-            <div class="col headImage">
+            <div class="col headImage text-center">
               <img src="static/images/head.png" class="head bordered"  alt="">
             </div>
-            <div class="col">
+            <div class="col text-center">
               <div class="d-flex flex-column justify-content-center">
                 <div class="coordinate">
                   <span class="cercle">x</span>
@@ -56,6 +59,7 @@
     <div class="col videoColumn">
       <div class="video">
         <img src="static/images/video.png" alt="">
+        <div class="separator"></div>
       </div> 
       <div class="coordinates">
         <div class="coordinatesContent">
