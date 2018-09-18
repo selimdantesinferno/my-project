@@ -1,10 +1,11 @@
 <template>
   <div class="contentDriving">
-    
-
+  
     <!-- <popup-status /> -->
-    <popup-accept />
+    <!-- <popup-accept /> -->
+    <popup_redlight/>
 
+  
     <div class="travelColumn">
       <div class="travelPoint">
         <div class="icon">
@@ -50,7 +51,7 @@
         <div class="point">
           <div class="dot">
             <div class="dotinside">
-                <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+              <img class="transp" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
             </div>
           </div>
         </div>
@@ -60,10 +61,12 @@
       </div>
       <div class="line"></div>
     </div>
-
-
+  
+  
     <div class="addressColumn">
-      <div class="title"><h1>Votre trajet Clara</h1></div>
+      <div class="title">
+        <h1>Votre trajet Clara</h1>
+      </div>
       <div class="pathContainer">
         <div class="originAddress">
           <div class="icon">
@@ -101,8 +104,8 @@
         </div>
       </div>
     </div>
-
-
+  
+  
     <div class="mapColumn">
       <div class="durationColumn">
         <div class="duration">
@@ -124,7 +127,7 @@
             </div>
           </div>
         </div>
-
+  
       </div>
       <div class="distanceColumn">
         <div class="distance">
@@ -146,7 +149,7 @@
         </div>
       </div>
     </div>
-
+  
     <div class="buttonColumn">
       <div class="modeButtons">
         <div class="button auto active">
@@ -167,130 +170,146 @@
           </div>
           <div class="text">Mode manuel</div>
         </div>
-
+  
       </div>
       <div class="goButton">
         <div class="stroke1">
           <div class="stroke2">
-            <a  href="" class="button">C'est parti !</a>            
+            <a href="" class="button">C'est parti !</a>
           </div>
         </div>
       </div>
       <div class="acceptCheck">
         <div class="icon">
-          <div class="dot"><div class="dotinside"></div></div>
+          <div class="dot">
+            <div class="dotinside"></div>
+          </div>
         </div>
         <div class="text">
           <div>
-            J’accèpte qu’on me propose la livraison de colis sur mon trajet en échange d’une réduction de prix de ma course.
+            J’accèpte qu’on me propose la livraison de colis sur mon trajet en échange d’une réduction de prix de ma course.
           </div>
         </div>
       </div>
     </div>
   </div>
-
 </template>
 
 <script>
-  import GoogleMap from './GoogleMap'
-  import popupAccept from './popupAccept'
-  import popupStatus from './popupStatus'
-  import axios from 'axios'
-  import moment from 'moment'
-  export default {
-    name: 'driving-page',
-    components: { GoogleMap, popupAccept, popupStatus },
-    data () {
-      return {
-        info:[],
-        main_path:[],
-        latitudedep:'',
-        longitudedep:'',
-        latitudearr:'',
-        longitudearr:'',
-        adresse1:[],
-        adresse2:[],
-        datenow: '',
-        datecol:'',
-        dateliv:'',
-        datearr:''
-      }
+import GoogleMap from "./GoogleMap";
+import popupAccept from "./popupAccept";
+import popupStatus from "./popupStatus";
+import popup_redlight from "./popup_redlight";
+import axios from "axios";
+import moment from "moment";
+export default {
+  name: "driving-page",
+  components: {
+    GoogleMap,
+    popupAccept,
+    popupStatus,
+    popup_redlight
+  },
+  data() {
+    return {
+      info: [],
+      main_path: [],
+      latitudedep: "",
+      longitudedep: "",
+      latitudearr: "",
+      longitudearr: "",
+      adresse1: [],
+      adresse2: [],
+      datenow: "",
+      datecol: "",
+      dateliv: "",
+      datearr: ""
+    };
+  },
+  methods: {
+    open(link) {
+      this.$electron.shell.openExternal(link);
     },
-    methods: {
-      open (link) {
-        this.$electron.shell.openExternal(link)
-      },
-      time() {
-  var self = this
-  this.datenow = moment().format('h:mm')
+    time() {
+      var self = this;
+      this.datenow = moment().format("h:mm");
 
-  // setInterval(self.time, 1000)
-},
-time2() {
-var self = this
-this.datecol = moment().add(3,'minutes').format('h:mm')
-
-},
-time3() {
-var self = this
-this.dateliv = moment().add(5,'minutes').format('h:mm')
-
-},
-time4() {
-var self = this
-this.datearr = moment().add(Math.trunc(this.info.time/60),'minutes').format('h:mm')
-
-}
+      // setInterval(self.time, 1000)
     },
-    mounted () {
+    time2() {
+      var self = this;
+      this.datecol = moment()
+        .add(3, "minutes")
+        .format("h:mm");
+    },
+    time3() {
+      var self = this;
+      this.dateliv = moment()
+        .add(5, "minutes")
+        .format("h:mm");
+    },
+    time4() {
+      var self = this;
+      this.datearr = moment()
+        .add(Math.trunc(this.info.time / 60), "minutes")
+        .format("h:mm");
+    }
+  },
+  mounted() {
     this.time();
 
-      this.$http
-        .get('/ride')
+    this.$http.get("/ride").then(response => {
+      this.info = response.data;
+
+      this.main_path = response.data.itineraries[0].itinerary.map(point => {
+        return {
+          lat: point.x,
+          lng: point.y
+        };
+      });
+
+      this.latitudedep = this.main_path[0].lat;
+      this.longitudedep = this.main_path[0].lng;
+      axios
+        .post(
+          "https://maps.googleapis.com/maps/api/geocode/json?latlng=" +
+            this.latitudedep +
+            "," +
+            this.longitudedep +
+            "&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM"
+        )
         .then(response => {
-    this.info=response.data;
+          this.adresse1 = response.data.results[0].formatted_address;
+        })
+        .catch(e => {
+          this.errors.push(e);
+        });
 
-        this.main_path = response.data.itineraries[0].itinerary.map( point =>{
-          return {lat: point.x, lng: point.y}
-          })
-
-      this.latitudedep=this.main_path[0].lat;
-      this.longitudedep=this.main_path[0].lng;
-      axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitudedep + ',' + this.longitudedep + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
-                .then(response => {
-      this.adresse1=response.data.results[0].formatted_address;
-      })
-                .catch(e => {
-                this.errors.push(e)
-              })
-
-    this.latitudearr=this.main_path[this.main_path.length-1].lat;
-    this.longitudearr=this.main_path[this.main_path.length-1].lng;
-    axios.post('https://maps.googleapis.com/maps/api/geocode/json?latlng=' + this.latitudearr + ',' + this.longitudearr + '&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM')
-           .then(response => {
-              this.adresse2=response.data.results[0].formatted_address;
-              console.log(this.adresse2);
-              })
-                        .catch(e => {
-                        this.errors.push(e)
-                      })
-                      this.time2();
-                      this.time3();
-                      this.time4();
-
-
-       })
-
-
-
-
-
-
-
-    }
+      this.latitudearr = this.main_path[this.main_path.length - 1].lat;
+      this.longitudearr = this.main_path[this.main_path.length - 1].lng;
+      axios
+        .post(
+          "https://maps.googleapis.com/maps/api/geocode/json?latlng=" +
+            this.latitudearr +
+            "," +
+            this.longitudearr +
+            "&key=AIzaSyAv2KTxY9QiIaWZg8JMXc9JA46mtzV5bOM"
+        )
+        .then(response => {
+          this.adresse2 = response.data.results[0].formatted_address;
+          console.log(this.adresse2);
+        })
+        .catch(e => {
+          this.errors.push(e);
+        });
+      this.time2();
+      this.time3();
+      this.time4();
+    });
   }
+};
 </script>
 
- <style src="./driving_page.sass" lang="sass">
+<style src="./driving_page.sass" lang="sass">
 
- </style>
+</style>
