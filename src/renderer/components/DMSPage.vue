@@ -26,23 +26,23 @@
               Head Position
             </div>
             <div class="col headImage text-center">
-              <img src="static/images/head.png" class="head bordered"  alt="">
+              <img src="static/images/repere.png" class="head bordered"  alt="">
             </div>
             <div class="col text-center">
               <div class="d-flex flex-column justify-content-center">
                 <div class="coordinate">
                   <span class="cercle">x</span>
-                  <span class="badge value">14.6</span>
+                  <span class="badge value">{{x}}</span>
                   <span class="unit">mm</span>
                 </div>
                 <div class="coordinate">
                   <span class="cercle">y</span>
-                  <span class="badge value">14.6</span>
+                  <span class="badge value">{{y}}</span>
                   <span class="unit">mm</span>
                 </div>
                 <div class="coordinate">
                   <span class="cercle">z</span>
-                  <span class="badge value">14.6</span>
+                  <span class="badge value">{{z}}</span>
                   <span class="unit">mm</span>
                 </div>
               </div>
@@ -60,9 +60,9 @@
       </div> 
       <div class="coordinates">
         <div class="coordinatesContent">
-          <div class="pitch"><div>Pitch</div> <div><span>15.0</span></div><div>Dg</div> </div>
-          <div class="yaw"><div>Yaw</div> <div><span>22.0</span></div><div>Dg</div> </div>
-          <div class="roll"><div>Roll</div> <div><span>1.0</span></div><div>Dg</div> </div>          
+          <div class="pitch"><div>Pitch</div> <div><span>{{pitch}}</span></div><div>Dg</div> </div>
+          <div class="yaw"><div>Yaw</div> <div><span>{{yaw}}</span></div><div>Dg</div> </div>
+          <div class="roll"><div>Roll</div> <div><span>{{roll}}</span></div><div>Dg</div> </div>          
         </div>
       </div>     
     </div>
@@ -115,12 +115,12 @@
               <div class="col bar">
                 <div class="progress">
                   <span class="marker"></span>
-                  <div class="progress-bar vert" role="progressbar" style="width: 34%" aria-valuenow="15" aria-valuemin="0" aria-valuemax="100"></div>
-                  <div class="progress-bar jaune" role="progressbar" style="width: 34%" aria-valuenow="30" aria-valuemin="0" aria-valuemax="100"></div>
-                  <div class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
+                 <div v-if="vigilance>50" class="progress-bar vert" role="progressbar" style="width: 34%" aria-valuenow="15" aria-valuemin="0" aria-valuemax="100"></div>
+                  <div v-if="vigilance<=50 && vigilance>=20" class="progress-bar jaune" role="progressbar" style="width: 34%" aria-valuenow="30" aria-valuemin="0" aria-valuemax="100"></div>
+                  <div v-if="vigilance<20" class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
-              <div class="col value">35%</div>
+              <div class="col value">{{vigilance}}</div>
             </div>
           </div>
 
@@ -174,25 +174,161 @@
 
 </template>
 
-<script>  
+<script> 
+import axios from 'axios' 
   export default {
     name: 'dms-page',
     data() {
       return {           
         actualRotation: "yaw",
         rotationValues: {
-          center : 'static/images/center.png',
-          pitch : 'static/images/pitch.png',
-          yaw : 'static/images/yaw.gif',
-          roll : 'static/images/roll.png'        
-        }
+          center : 'static/images/fix-head.png',
+          pitch : 'static/images/pitch-1.gif',
+          yaw : 'static/images/yaw-1.gif',
+          roll : 'static/images/roll-1.gif'        
+        },
+        timer_eyes_off:0,
+  speed:[],
+  biometry:[],
+  nyaw:0,
+  npitch:0,
+  nroll:0,
+  yaw:0,
+  pitch:0,
+  roll:0,
+  x:0,
+  y:0,
+  z:0,
+  max_x:0,
+  max_y:0,
+  max_z:0,
+  nx:0,
+  ny:0,
+  nz:0,
+  vigilance:100,
+  somnolence:100,
+  fatigue:100,
+  stress:100,
+  timer_drow:0,
+  interval:null
       }      
     },
     computed: {
       rotationImage() {
         return this.rotationValues[this.actualRotation]
       }
-    }
+    },
+
+ methods:
+  {
+  request(){
+  self=this;
+  axios.get('http://localhost:5000/pull/car/biometrydata')
+      .then(function (response) {
+        // handle success
+        self.biometry=response.data.biometrydata;
+       
+       for(var i=0;i<100;i++)
+       {
+       self.x=self.biometry[i].headPosition.s32XInMm;
+        self.y=self.biometry[i].headPosition.s32YInMm;
+        self.z=self.biometry[i].headPosition.s32ZInMm;
+        self.pitch=self.biometry[i].headPose.f32PitchInDegrees;
+        self.yaw=self.biometry[i].headPose.f32YawInDegrees;
+        self.roll=self.biometry[i].headPose.f32RollInDegrees;
+        if(i==0)
+        {
+         self.max_x=Math.abs(self.biometry[i].headPosition.s32XInMm);
+        self.max_y=Math.abs(self.biometry[i].headPosition.s32YInMm);
+        self.max_z=Math.abs(self.biometry[i].headPosition.s32ZInMm);
+        }
+        else
+        {
+        self.max_x=Math.max(Math.abs(self.biometry[i].headPosition.s32XInMm),Math.abs(self.biometry[i+1].headPosition.s32XInMm))
+        self.max_y=Math.max(Math.abs(self.biometry[i].headPosition.s32YInMm),Math.abs(self.biometry[i+1].headPosition.s32YInMm))
+        self.max_z=Math.max(Math.abs(self.biometry[i].headPosition.s32ZInMm),Math.abs(self.biometry[i+1].headPosition.s32ZInMm))
+        }        
+        if(self.max_x>20)
+         {
+                self.nx++; 
+                self.ny=0;
+                self.nz=0;  
+               if(self.nx>=2)       
+                
+                self.actualRotation="yawg";
+         }
+        else if(self.max_y>20)
+         {
+            self.ny++; 
+            self.nx=0;
+            self.nz=0;
+            
+            if(self.ny>=2)     
+            self.actualRotation="pitchg";
+
+         }
+      else if(self.max_z>20)
+         {
+                self.nz++; 
+                self.nx=0;
+                self.ny=0; 
+              if(self.nz>=2)        
+
+         self.actualRotation="rollg";
+         
+         }
+        else if(Math.abs(self.biometry[i].eyesDirection.f32YawInDegree)>15 || Math.abs(self.biometry[i].eyesDirection.f32PitchInDegree)>15 || (self.biometry[i].eyelidOpening.f32LeftOpeningLevel<=4 &&  self.biometry[i].eyelidOpening.f32RightOpeningLevel<=4))
+        {
+         setInterval(function(){self.timer_eyes_off++},4000);
+         if(self.timer_eyes_off<=1)
+         { 
+                  self.vigilance=self.vigilance-10;
+         }
+                  if(self.timer_eyes_off>1 && self.timer_eyes_off<=2)
+         {
+                  self.vigilance=self.vigilance-30;
+         }
+                  if(self.timer_eyes_off>2 && self.timer_eyes_off<=4)
+         {
+                  self.vigilance=vigilance-50;
+         }
+                 if(self.timer_eyes_off>4 || self.vigilance<0)
+         {
+                  self.vigilance=0;
+         }
+         
+         
+         
+         
+        }
+        else{
+        self.vigilance=100;}
+         
+      
+         }
+      })
+  .catch(function (error) {
+        // handle error
+        console.log(error);
+      });
+       }
+        
+      },
+      computed: {
+      rotationImage() {
+        return this.rotationValues[this.actualRotation]
+      }
+    },
+mounted () {
+this.request();
+this.interval=setInterval(function(){
+this.request();}.bind(this),4500);
+
+      
+  },
+  beforeDestroy:function(){
+  clearInterval(this.interval);
+  }
   }
 </script>
  

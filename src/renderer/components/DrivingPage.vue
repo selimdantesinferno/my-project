@@ -172,9 +172,6 @@
           </div>
           <div class="text">Mode manuel</div>
         </div>
-<<<<<<< HEAD
-  
-=======
 
         <div class="button showroom">
           <div class="roundedButton">
@@ -187,7 +184,6 @@
           <div class="text">Showroom</div>
         </div>
 
->>>>>>> ec103eeb63713503d33a43fc22d61e6b586b4a53
       </div>
       <div class="goButton">
         <div class="stroke1">
