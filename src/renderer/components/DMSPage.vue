@@ -33,17 +33,17 @@
                 <div class="coordinate">
                   <span class="cercle">x</span>
                   <span class="badge value">14.6</span>
-                  <span class="unit">cm</span>
+                  <span class="unit">mm</span>
                 </div>
                 <div class="coordinate">
                   <span class="cercle">y</span>
                   <span class="badge value">14.6</span>
-                  <span class="unit">cm</span>
+                  <span class="unit">mm</span>
                 </div>
                 <div class="coordinate">
                   <span class="cercle">z</span>
                   <span class="badge value">14.6</span>
-                  <span class="unit">cm</span>
+                  <span class="unit">mm</span>
                 </div>
               </div>
             </div>
@@ -60,9 +60,9 @@
       </div> 
       <div class="coordinates">
         <div class="coordinatesContent">
-          <div class="pitch"><div>Pitch</div> <div><span>15.0</span></div> </div>
-          <div class="yaw"><div>Yaw</div> <div><span>22.0</span></div> </div>
-          <div class="roll"><div>Roll</div> <div><span>1.0</span></div> </div>          
+          <div class="pitch"><div>Pitch</div> <div><span>15.0</span></div><div>Dg</div> </div>
+          <div class="yaw"><div>Yaw</div> <div><span>22.0</span></div><div>Dg</div> </div>
+          <div class="roll"><div>Roll</div> <div><span>1.0</span></div><div>Dg</div> </div>          
         </div>
       </div>     
     </div>
