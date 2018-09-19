@@ -70,19 +70,18 @@
 </template>
 
 <script>
-  import GoogleMap from './GoogleMap'
+import GoogleMap from "./GoogleMap";
 
-  export default {
-    name: 'popup-accept',
-    components: { GoogleMap },    
-    data () {
-      return {
-        modalClass: 'left',
-        modalShow: true
-      }
-    }
+export default {
+  name: "popup-accept",
+  components: { GoogleMap },
+  data() {
+    return {
+      modalClass: "left",
+      modalShow: true
+    };
   }
-  
+};
 </script>
 
 <style src="./popupAccept.sass" lang="sass">
