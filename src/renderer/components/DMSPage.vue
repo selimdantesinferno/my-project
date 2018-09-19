@@ -2,15 +2,12 @@
  <div class="container-fluid dmsPage">
   <div class="row h-100 no-gutters">
 
-    <div class="col logoColumn">
-      <div class="align-items-center d-flex logo">
-        <img src="static/images/idemiaLogo.png" alt="">
-      </div>
-    </div>
-
     <div class="col detectionColumn">
       <div class="d-flex flex-column justify-content-center ">
         <div class="content">
+          <div class="align-items-center d-flex logoIdemia">
+            <img src="static/images/idemiaLogo.png" alt="">
+          </div>
           <div class="row no-gutters movements">            
             <div class="col text">Face movements</div>
             
@@ -58,7 +55,7 @@
 
     <div class="col videoColumn">
       <div class="video">
-        <img src="static/images/video.png" alt="">
+        <img :src="rotationImage" alt="">
         <div class="separator"></div>
       </div> 
       <div class="coordinates">
@@ -179,7 +176,23 @@
 
 <script>  
   export default {
-    name: 'dms-page'
+    name: 'dms-page',
+    data() {
+      return {           
+        actualRotation: "center",
+        rotationValues: {
+          center : 'static/images/center.png',
+          pitch : 'static/images/pitch.png',
+          yaw : 'static/images/yaw.png',
+          roll : 'static/images/roll.png'        
+        }
+      }      
+    },
+    computed: {
+      rotationImage() {
+        return this.rotationValues[this.actualRotation]
+      }
+    }
   }
 </script>
  
