@@ -15,7 +15,7 @@
               Eyes<br>
               <img src="static/images/eyes.png" class="eyes bordered"  alt="">
             </div>
-            <div class="col text-center">
+            <div class="col text-center mouthText">
               Mouth<br>
               <img src="static/images/mouth.png" class="mouth bordered"  alt="">
             </div>
@@ -179,11 +179,11 @@
     name: 'dms-page',
     data() {
       return {           
-        actualRotation: "center",
+        actualRotation: "yaw",
         rotationValues: {
           center : 'static/images/center.png',
           pitch : 'static/images/pitch.png',
-          yaw : 'static/images/yaw.png',
+          yaw : 'static/images/yaw.gif',
           roll : 'static/images/roll.png'        
         }
       }      
