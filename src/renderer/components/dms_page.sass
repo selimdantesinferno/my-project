@@ -4,9 +4,17 @@
   padding: 0
   height: 388px
   
+  .logoColumn
+    flex: 0 0 12%
+    padding-top: 25px
+    .logo
+      padding: 0 10px
+
+    img
+      width: 100%
+
   .detectionColumn
-    flex: 0 0 39.5%
-    border-right: 5px solid black
+    flex: 0 0 30.5%
     .content img.bordered
       border: 1px solid grey
       border-radius: 5px
@@ -17,66 +25,58 @@
       &.mouth
         padding: 18px 25px
 
-    .movements
-      border-bottom: 5px solid black
+    .movements      
       .col
-        padding: 45px 0 15px 9px
-        &.logo
-          flex: 0 0 23%
-          background: white
-          padding: 25px
-          img
-            width: 100%
+        padding: 30px 0 15px 0px        
         &.text
-          flex: 0 0 28%
           font-size: 24px
-          border-left: 3px solid black
+          flex: 0 0 38%
+          padding: 80px 0 0 15px
     
     .position
-      padding: 18px 0px
-
+      padding: 31px 0px 25px
       .text
-        flex: 0 0 32%
-        padding: 11px 0 0 15px
+        padding: 50px 0 0 15px
         font-size: 24px
-      .headImage
         flex: 0 0 38%
+      .headImage
         img.head
-          width: 156px
           padding: 13px
-
       .coordinate
         margin-top: 9px
         *
           display: inline-block
         .cercle
           border-radius: 50%
-          background-color: #9b9b9b
+          border: 1px solid gray
           height: 48px
           width: 48px
           text-align: center
           padding-top: 7px
-
         .value
-          background-color: #9b9b9b
           font-weight: 100
           padding: 8px 22px
-          margin-left: -18px
+          margin-left: -14px
           font-size: 18px
-          border-radius: 0 8px 8px
+          border-radius: 0 8px 8px 0
           margin-right: 8px
+          border: 1px solid gray
+          border-left: none
       
-
   .videoColumn
     flex: 0 0 14%
-    border-right: 5px solid black
     
     .video
-      padding: 31px 53px
-      border-bottom: 5px solid black
+      padding: 28px 53px 15px
+      .separator
+        background: gray
+        height: 320px
+        width: 1px
+        position: absolute
+        top: 35px
+        right: 0      
       img
         width: 100%
-
     .coordinates
       display: flex
       justify-content: center
@@ -85,11 +85,10 @@
       .coordinatesContent
         display: flex
         flex-direction: column
-        padding: 8px 0
         > *
           display: flex
           justify-content: space-between
-
+          margin-top: 7px
           > *
             flex: 0 0 35%
 
@@ -98,7 +97,6 @@
 
           > :nth-child(2)
             margin-left: 20px
-
           span
             font-size: 14px
             border: 1px solid
@@ -110,7 +108,7 @@
 
   .statusColumn
     .condition
-      flex: 0 0 65%
+      flex: 0 0 70%
       font-size: 24px
       .titre
         text-align: center
@@ -150,9 +148,8 @@
     .logoBar
       height: 112px
       text-align: center
-      background: white
-      padding: 38px 75px
-      border-left: 2px solid black
+      padding: 33px 15px
+      
       img
         width: 100%
         height: auto
@@ -161,9 +158,10 @@
       .content
         padding: 20px 0 0 0
         font-size: 24px
-        border-left: 5px solid black
+        color: gray
+        
       .constantsBox
-        border: 1px solid #43debd
+        border: 1px solid rgba(67, 222, 189, 0.47)
         border-radius: 15px
         font-size: 20px
         font-weight: 500
@@ -182,6 +180,3 @@
             text-align: left
           img
             height: 32px
-            
-
-
