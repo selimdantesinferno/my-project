@@ -147,7 +147,7 @@
                     <img src="static/images/coeur.png" alt="">                    
                   </div>
                   <div class="text">
-                    <span>72 bpm</span>
+                    <span>60 bpm</span>
                   </div>
                   
                 </div>
@@ -174,162 +174,151 @@
 
 </template>
 
-<script> 
-import axios from 'axios' 
-  export default {
-    name: 'dms-page',
-    data() {
-      return {           
-        actualRotation: "yaw",
-        rotationValues: {
-          center : 'static/images/fix-head.png',
-          pitch : 'static/images/pitch-1.gif',
-          yaw : 'static/images/yaw-1.gif',
-          roll : 'static/images/roll-1.gif'        
-        },
-        timer_eyes_off:0,
-  speed:[],
-  biometry:[],
-  nyaw:0,
-  npitch:0,
-  nroll:0,
-  yaw:0,
-  pitch:0,
-  roll:0,
-  x:0,
-  y:0,
-  z:0,
-  max_x:0,
-  max_y:0,
-  max_z:0,
-  nx:0,
-  ny:0,
-  nz:0,
-  vigilance:100,
-  somnolence:100,
-  fatigue:100,
-  stress:100,
-  timer_drow:0,
-  interval:null
-      }      
-    },
-    computed: {
-      rotationImage() {
-        return this.rotationValues[this.actualRotation]
-      }
-    },
-
- methods:
-  {
-  request(){
-  self=this;
-  axios.get('http://localhost:5000/pull/car/biometrydata')
-      .then(function (response) {
-        // handle success
-        self.biometry=response.data.biometrydata;
-       
-       for(var i=0;i<100;i++)
-       {
-       self.x=self.biometry[i].headPosition.s32XInMm;
-        self.y=self.biometry[i].headPosition.s32YInMm;
-        self.z=self.biometry[i].headPosition.s32ZInMm;
-        self.pitch=self.biometry[i].headPose.f32PitchInDegrees;
-        self.yaw=self.biometry[i].headPose.f32YawInDegrees;
-        self.roll=self.biometry[i].headPose.f32RollInDegrees;
-        if(i==0)
-        {
-         self.max_x=Math.abs(self.biometry[i].headPosition.s32XInMm);
-        self.max_y=Math.abs(self.biometry[i].headPosition.s32YInMm);
-        self.max_z=Math.abs(self.biometry[i].headPosition.s32ZInMm);
-        }
-        else
-        {
-        self.max_x=Math.max(Math.abs(self.biometry[i].headPosition.s32XInMm),Math.abs(self.biometry[i+1].headPosition.s32XInMm))
-        self.max_y=Math.max(Math.abs(self.biometry[i].headPosition.s32YInMm),Math.abs(self.biometry[i+1].headPosition.s32YInMm))
-        self.max_z=Math.max(Math.abs(self.biometry[i].headPosition.s32ZInMm),Math.abs(self.biometry[i+1].headPosition.s32ZInMm))
-        }        
-        if(self.max_x>20)
-         {
-                self.nx++; 
-                self.ny=0;
-                self.nz=0;  
-               if(self.nx>=2)       
-                
-                self.actualRotation="yawg";
-         }
-        else if(self.max_y>20)
-         {
-            self.ny++; 
-            self.nx=0;
-            self.nz=0;
-            
-            if(self.ny>=2)     
-            self.actualRotation="pitchg";
-
-         }
-      else if(self.max_z>20)
-         {
-                self.nz++; 
-                self.nx=0;
-                self.ny=0; 
-              if(self.nz>=2)        
-
-         self.actualRotation="rollg";
-         
-         }
-        else if(Math.abs(self.biometry[i].eyesDirection.f32YawInDegree)>15 || Math.abs(self.biometry[i].eyesDirection.f32PitchInDegree)>15 || (self.biometry[i].eyelidOpening.f32LeftOpeningLevel<=4 &&  self.biometry[i].eyelidOpening.f32RightOpeningLevel<=4))
-        {
-         setInterval(function(){self.timer_eyes_off++},4000);
-         if(self.timer_eyes_off<=1)
-         { 
-                  self.vigilance=self.vigilance-10;
-         }
-                  if(self.timer_eyes_off>1 && self.timer_eyes_off<=2)
-         {
-                  self.vigilance=self.vigilance-30;
-         }
-                  if(self.timer_eyes_off>2 && self.timer_eyes_off<=4)
-         {
-                  self.vigilance=vigilance-50;
-         }
-                 if(self.timer_eyes_off>4 || self.vigilance<0)
-         {
-                  self.vigilance=0;
-         }
-         
-         
-         
-         
-        }
-        else{
-        self.vigilance=100;}
-         
-      
-         }
-      })
-  .catch(function (error) {
-        // handle error
-        console.log(error);
-      });
-       }
-        
+<script>
+import axios from "axios";
+export default {
+  name: "dms-page",
+  data() {
+    return {
+      actualRotation: "yaw",
+      rotationValues: {
+        center: "static/images/fix-head.png",
+        pitch: "static/images/pitch-1.gif",
+        yaw: "static/images/yaw-1.gif",
+        roll: "static/images/roll-1.gif"
       },
-      computed: {
-      rotationImage() {
-        return this.rotationValues[this.actualRotation]
-      }
-    },
-mounted () {
-this.request();
-this.interval=setInterval(function(){
-this.request();}.bind(this),4500);
-
-      
+      timer_eyes_off: 0,
+      speed: [],
+      biometry: [],
+      nyaw: 0,
+      npitch: 0,
+      nroll: 0,
+      yaw: 0,
+      pitch: 0,
+      roll: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      max_x: 0,
+      max_y: 0,
+      max_z: 0,
+      nx: 0,
+      ny: 0,
+      nz: 0,
+      vigilance: 100,
+      somnolence: 100,
+      fatigue: 100,
+      stress: 100,
+      timer_drow: 0,
+      interval: null
+    };
   },
-  beforeDestroy:function(){
-  clearInterval(this.interval);
+  computed: {
+    rotationImage() {
+      return this.rotationValues[this.actualRotation];
+    }
+  },
+
+  methods: {
+    request() {
+      self = this;
+      axios
+        .get("http://localhost:5000/pull/car/biometrydata")
+        .then(function(response) {
+          // handle success
+          self.biometry = response.data.biometrydata;
+
+          for (var i = 0; i < 100; i++) {
+            self.x = self.biometry[i].headPosition.s32XInMm;
+            self.y = self.biometry[i].headPosition.s32YInMm;
+            self.z = self.biometry[i].headPosition.s32ZInMm;
+            self.pitch = self.biometry[i].headPose.f32PitchInDegrees;
+            self.yaw = self.biometry[i].headPose.f32YawInDegrees;
+            self.roll = self.biometry[i].headPose.f32RollInDegrees;
+            if (i == 0) {
+              self.max_x = Math.abs(self.biometry[i].headPosition.s32XInMm);
+              self.max_y = Math.abs(self.biometry[i].headPosition.s32YInMm);
+              self.max_z = Math.abs(self.biometry[i].headPosition.s32ZInMm);
+            } else {
+              self.max_x = Math.max(
+                Math.abs(self.biometry[i].headPosition.s32XInMm),
+                Math.abs(self.biometry[i + 1].headPosition.s32XInMm)
+              );
+              self.max_y = Math.max(
+                Math.abs(self.biometry[i].headPosition.s32YInMm),
+                Math.abs(self.biometry[i + 1].headPosition.s32YInMm)
+              );
+              self.max_z = Math.max(
+                Math.abs(self.biometry[i].headPosition.s32ZInMm),
+                Math.abs(self.biometry[i + 1].headPosition.s32ZInMm)
+              );
+            }
+            if (self.max_x > 20) {
+              self.nx++;
+              self.ny = 0;
+              self.nz = 0;
+              if (self.nx >= 2) self.actualRotation = "yawg";
+            } else if (self.max_y > 20) {
+              self.ny++;
+              self.nx = 0;
+              self.nz = 0;
+
+              if (self.ny >= 2) self.actualRotation = "pitchg";
+            } else if (self.max_z > 20) {
+              self.nz++;
+              self.nx = 0;
+              self.ny = 0;
+              if (self.nz >= 2) self.actualRotation = "rollg";
+            } else if (
+              Math.abs(self.biometry[i].eyesDirection.f32YawInDegree) > 15 ||
+              Math.abs(self.biometry[i].eyesDirection.f32PitchInDegree) > 15 ||
+              (self.biometry[i].eyelidOpening.f32LeftOpeningLevel <= 4 &&
+                self.biometry[i].eyelidOpening.f32RightOpeningLevel <= 4)
+            ) {
+              setInterval(function() {
+                self.timer_eyes_off++;
+              }, 4000);
+              if (self.timer_eyes_off <= 1) {
+                self.vigilance = self.vigilance - 10;
+              }
+              if (self.timer_eyes_off > 1 && self.timer_eyes_off <= 2) {
+                self.vigilance = self.vigilance - 30;
+              }
+              if (self.timer_eyes_off > 2 && self.timer_eyes_off <= 4) {
+                self.vigilance = vigilance - 50;
+              }
+              if (self.timer_eyes_off > 4 || self.vigilance < 0) {
+                self.vigilance = 0;
+              }
+            } else {
+              self.vigilance = 100;
+            }
+          }
+        })
+        .catch(function(error) {
+          // handle error
+          console.log(error);
+        });
+    }
+  },
+  computed: {
+    rotationImage() {
+      return this.rotationValues[this.actualRotation];
+    }
+  },
+  mounted() {
+    this.request();
+    this.interval = setInterval(
+      function() {
+        this.request();
+      }.bind(this),
+      4500
+    );
+  },
+  beforeDestroy: function() {
+    clearInterval(this.interval);
   }
-  }
+};
 </script>
  
 <style scope src="./dms_page.sass" lang="sass">
