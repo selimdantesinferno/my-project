@@ -188,6 +188,7 @@ import axios from 'axios'
           roll : 'static/images/roll-1.gif'        
         },
         timer_eyes_off:0,
+        timer_eyes_closed:0,
   speed:[],
   biometry:[],
   nyaw:0,
@@ -239,6 +240,8 @@ import axios from 'axios'
         self.pitch=self.biometry[i].headPose.f32PitchInDegrees;
         self.yaw=self.biometry[i].headPose.f32YawInDegrees;
         self.roll=self.biometry[i].headPose.f32RollInDegrees;
+        
+        //estimate vigilance
         if(i==0)
         {
          self.max_x=Math.abs(self.biometry[i].headPosition.s32XInMm);
@@ -321,6 +324,25 @@ import axios from 'axios'
          
       
          }
+          
+          // Algo Drowsiness
+
+         if(self.biometry[i].eyelidOpening.f32LeftOpeningLevel<=4 &&  self.biometry[i].eyelidOpening.f32RightOpeningLevel<=4)
+         {
+          self.timer_drow = setInterval(countup, 1000);
+           if(self.timer_drow>1)
+            self.somnolence+=30;
+           if(self.timer_drow>2 && self.timer_drow<=4)
+            self.somnolence+=30
+           if(self.timer_drow==4 || self.somnolence>100)
+            self.somnolence=100;
+          if(this.timer_drow>4)
+            self.somnolence=0;
+
+           
+         }
+         // Algo fatigue
+         //if(self.)
 
       })
   .catch(function (error) {
@@ -336,7 +358,18 @@ import axios from 'axios'
        
         this.timeLeft--;
     }
+  },
+    countup() {
+    if (this.timer_eyes_closed >4) {
+        this.timer_eyes_closed=0;
+        clearTimeout(this.timer_drow);
+        
+    } else {
+       
+        this.timer_eyes_closed++;
+    }
 },
+ 
 
         
       },
