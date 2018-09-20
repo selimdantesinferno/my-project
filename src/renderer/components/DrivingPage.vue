@@ -4,7 +4,7 @@
     <!-- <popup-status /> -->
     <!-- <popup-accept /> -->
     <!-- <popup_redlight/> -->
-    <popup_timer/>>
+    <popup_timer />
   
     <div class="travelColumn">
       <div class="travelPoint">

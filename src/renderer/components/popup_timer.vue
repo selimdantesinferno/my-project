@@ -7,6 +7,9 @@
           <div class="titre">
             <h2>Have a break</h2>
           </div>
+          <div>
+            <img src="static/icons/icon-coffee.svg"/>
+          </div>
           <div class="text">You seem to need to take a break.<br>
           You should stop or let me take control</div>
         </div>
