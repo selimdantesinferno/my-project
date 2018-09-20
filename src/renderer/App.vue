@@ -21,7 +21,6 @@
 
 body {
 	color: white
-
 }
 
 </style>
