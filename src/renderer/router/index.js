@@ -1,6 +1,6 @@
 import Vue from 'vue'
 import Router from 'vue-router'
-import Menu1 from '@/components/menu1'
+
 Vue.use(Router)
 
 export default new Router({
@@ -39,11 +39,7 @@ export default new Router({
       path: '*',
       redirect: '/'
     }
-    ,
-    {
-       path: '/menu1',
-       name: 'Menu1',
-       component: Menu1
-   }
+    
+   
   ]
 })
