@@ -315,6 +315,7 @@ import axios from 'axios'
          
          
         }
+
         else{
         self.vigilance=100;}
          
@@ -327,7 +328,7 @@ import axios from 'axios'
         console.log(error);
       });
        },
-  countdown(function()) {
+  countdown() {
     if (this.timeLeft == -1) {
         clearTimeout(this.timerId);
         
