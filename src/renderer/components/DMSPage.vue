@@ -206,6 +206,8 @@ import axios from 'axios'
   ny:0,
   nz:0,
   vigilance:100,
+  timeLeft:60,
+  timerId:null,
   somnolence:100,
   fatigue:100,
   stress:100,
@@ -250,19 +252,25 @@ import axios from 'axios'
         }        
         if(self.max_x>20)
          {
-                self.nx++; 
+                self.nx++;
+                
                 self.ny=0;
-                self.nz=0;  
+                self.nz=0;
+                
+                this.timerId = setInterval(countdown, 1000);
+                self.nyaw++;  
                if(self.nx>=2)       
                 
                 self.actualRotation="yawg";
          }
         else if(self.max_y>20)
          {
-            self.ny++; 
+            self.ny++;
+             
             self.nx=0;
             self.nz=0;
-            
+            this.timerId = setInterval(countdown, 1000);
+            self.npitch++;  
             if(self.ny>=2)     
             self.actualRotation="pitchg";
 
@@ -270,13 +278,18 @@ import axios from 'axios'
       else if(self.max_z>20)
          {
                 self.nz++; 
+                
                 self.nx=0;
-                self.ny=0; 
+                self.ny=0;
+                
+                var timerId = setInterval(countdown, 1000);
+                self.nroll++;   
               if(self.nz>=2)        
 
          self.actualRotation="rollg";
          
          }
+
         else if(Math.abs(self.biometry[i].eyesDirection.f32YawInDegree)>15 || Math.abs(self.biometry[i].eyesDirection.f32PitchInDegree)>15 || (self.biometry[i].eyelidOpening.f32LeftOpeningLevel<=4 &&  self.biometry[i].eyelidOpening.f32RightOpeningLevel<=4))
         {
          setInterval(function(){self.timer_eyes_off++},4000);
@@ -306,12 +319,22 @@ import axios from 'axios'
          
       
          }
+
       })
   .catch(function (error) {
         // handle error
         console.log(error);
       });
-       }
+       },
+  countdown(function()) {
+    if (this.timeLeft == -1) {
+        clearTimeout(this.timerId);
+        
+    } else {
+       
+        this.timeLeft--;
+    }
+}
         
       },
       computed: {
