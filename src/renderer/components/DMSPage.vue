@@ -207,6 +207,7 @@ import axios from 'axios'
   nz:0,
   vigilance:100,
   timeLeft:60,
+  timer_stress:0,
   timerId:null,
   somnolence:100,
   fatigue:100,
@@ -232,7 +233,7 @@ import axios from 'axios'
        
        for(var i=0;i<100;i++)
        {
-       self.x=self.biometry[i].headPosition.s32XInMm;
+        self.x=self.biometry[i].headPosition.s32XInMm;
         self.y=self.biometry[i].headPosition.s32YInMm;
         self.z=self.biometry[i].headPosition.s32ZInMm;
         self.pitch=self.biometry[i].headPose.f32PitchInDegrees;
@@ -334,7 +335,8 @@ import axios from 'axios'
        
         this.timeLeft--;
     }
-}
+},
+
         
       },
       computed: {
