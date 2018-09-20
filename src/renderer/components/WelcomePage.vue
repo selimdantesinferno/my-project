@@ -33,7 +33,20 @@
 
 <script>  
   export default {
-    name: 'welcome-page'
+    name: 'welcome-page',
+      mounted(){
+      this.gotodrive();
+
+
+      },
+      methods:{
+      gotodrive(){
+      for(var i=0;i<=100;i++)
+      if(i==100)
+      this.$router.push('/go');
+      }
+
+      }
   }
 </script>
  
