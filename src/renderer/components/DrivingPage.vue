@@ -4,7 +4,7 @@
     <!-- <popup-status /> -->
     <!-- <popup-accept /> -->
     <!-- <popup_redlight/> -->
-
+    <popup_timer/>>
   
     <div class="travelColumn">
       <div class="travelPoint">
@@ -213,12 +213,14 @@ import GoogleMap from "./GoogleMap";
 import popupAccept from "./popupAccept";
 import popupStatus from "./popupStatus";
 import popup_redlight from "./popup_redlight";
+import popup_timer from "./popup_timer";
 import axios from "axios";
 import moment from "moment";
 export default {
   name: "driving-page",
   components: {
     GoogleMap,
+    popup_timer,
     popupAccept,
     popupStatus,
     popup_redlight

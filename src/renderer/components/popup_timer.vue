@@ -5,15 +5,10 @@
       <div class="content">
         <div class="textColumn">
           <div class="titre">
-            <h2><img src="static/images/info.png" class="info"/>You are tired</h2>
+            <h2>Have a break</h2>
           </div>
-          <div class="text">Be careful! You are in a bad driving condition. Please take a rest and come back later.</div>
-        </div>
-  
-        <div class="buttonsContainer">
-          <div class="cancelButton">
-              <img src="static/icons/refuse.svg" class="img">      
-          </div>
+          <div class="text">You seem to need to take a break.<br>
+          You should stop or let me take control</div>
         </div>
   
       </div>
