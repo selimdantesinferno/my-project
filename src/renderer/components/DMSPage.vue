@@ -1,7 +1,7 @@
 <template>
  <div class="container-fluid dmsPage">
- <popup_timer v-if="time_tired==180000"/>
-  <div class="row h-100 no-gutters">
+ <popup_timer v-if="time_tired>=180000 && time_tired<=190000"/>
+ <div class="row h-100 no-gutters">
 
     <div class="col detectionColumn">
       <div class="d-flex flex-column justify-content-center ">
@@ -295,9 +295,13 @@ import popup_timer from "./popup-timer";
                 
                 var timerId = setInterval(countdown, 1000);
                 self.nroll++;   
-              if(self.nz>=2)        
+              if(self.nz>=2)
+              {
+                 self.actualRotation="rollg";
+                 self.fatigue+=10;
+              }        
 
-         self.actualRotation="rollg";
+        
          
          }
 
@@ -308,20 +312,21 @@ import popup_timer from "./popup-timer";
          { 
                   self.vigilance=self.vigilance-10;
          }
-                  if(self.timer_eyes_off>1 && self.timer_eyes_off<=2)
+          else if(self.timer_eyes_off>1 && self.timer_eyes_off<=2)
          {
                   self.vigilance=self.vigilance-30;
          }
-                  if(self.timer_eyes_off>2 && self.timer_eyes_off<=4)
+         else if(self.timer_eyes_off>2 && self.timer_eyes_off<=4)
          {
                   self.vigilance=vigilance-50;
          }
-                 if(self.timer_eyes_off>4 || self.vigilance<0)
+         else if(self.timer_eyes_off>4 || self.vigilance<0)
          {
                   self.vigilance=0;
          }
          
-         
+         else
+          //do nothing
          
          
         }
@@ -377,7 +382,7 @@ import popup_timer from "./popup-timer";
     }
 },
 countuppop() {
-    if (this.time_tired >180000) {
+    if (this.time_tired >300000) {
         this.time_tired=0;
         
         
