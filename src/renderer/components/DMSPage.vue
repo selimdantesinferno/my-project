@@ -1,5 +1,6 @@
 <template>
  <div class="container-fluid dmsPage">
+ <popup_timer v-if="time_tired==180000"/>
   <div class="row h-100 no-gutters">
 
     <div class="col detectionColumn">
@@ -84,7 +85,7 @@
                   <div class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
-              <div class="col value">35%</div>
+              <div class="col value">{{fatigue}}%</div>
             </div>
             <div class="feature d-flex">
               <div class="col name">Stress</div>
@@ -96,7 +97,7 @@
                   <div class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
-              <div class="col value">35%</div>
+              <div class="col value">{{stress}}%</div>
             </div>
             <div class="feature d-flex">
               <div class="col name">Sleepness</div>
@@ -108,7 +109,7 @@
                   <div class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
-              <div class="col value">35%</div>
+              <div class="col value">{{somnolence}}%</div>
             </div>
             <div class="feature d-flex">
               <div class="col name">Vigilance</div>
@@ -120,7 +121,7 @@
                   <div v-if="vigilance<20" class="progress-bar rouge" role="progressbar" style="width: 34%" aria-valuenow="20" aria-valuemin="0" aria-valuemax="100"></div>
                 </div>
               </div>
-              <div class="col value">{{vigilance}}</div>
+              <div class="col value">{{vigilance}}%</div>
             </div>
           </div>
 
@@ -176,8 +177,13 @@
 
 <script> 
 import axios from 'axios' 
+import popup_timer from "./popup-timer";
+
   export default {
     name: 'dms-page',
+    components: {
+      popup_timer
+    },
     data() {
       return {           
         actualRotation: "yaw",
@@ -208,11 +214,12 @@ import axios from 'axios'
   nz:0,
   vigilance:100,
   timeLeft:60,
+  time_tired:0,
   timer_stress:0,
   timerId:null,
-  somnolence:100,
-  fatigue:100,
-  stress:100,
+  somnolence:0,
+  fatigue:0,
+  stress:0,
   timer_drow:0,
   interval:null
       }      
@@ -342,7 +349,7 @@ import axios from 'axios'
            
          }
          // Algo fatigue
-         //if(self.)
+         if(self.)
 
       })
   .catch(function (error) {
@@ -369,6 +376,16 @@ import axios from 'axios'
         this.timer_eyes_closed++;
     }
 },
+countuppop() {
+    if (this.time_tired >180000) {
+        this.time_tired=0;
+        
+        
+    } else {
+       
+        this.time_tired++;
+    }
+}
  
 
         
@@ -379,25 +396,17 @@ import axios from 'axios'
       }
     },
 mounted () {
+setInterval(countuppop, 1000)
 this.request();
 this.interval=setInterval(function(){
-this.request();}.bind(this),4500);
-
+this.request();}.bind(this),1000);
+this.time_tired=setInterval(countuppop,1000);
       
   },
   computed: {
     rotationImage() {
       return this.rotationValues[this.actualRotation];
     }
-  },
-  mounted() {
-    this.request();
-    this.interval = setInterval(
-      function() {
-        this.request();
-      }.bind(this),
-      4500
-    );
   },
   beforeDestroy: function() {
     clearInterval(this.interval);

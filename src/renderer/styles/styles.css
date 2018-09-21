@@ -4,6 +4,8 @@ body {
   width: 100%;
   font-weight: 100;
   color: white;
+  background-image: url("fond.jpg");
+  background-color: #cccccc;
 
 }
 h1 {
