@@ -24,13 +24,10 @@
 </template>
 
 <script>
-import GoogleMap from "./GoogleMap";
+
 
 export default {
   name: "popup-timer",
-  components: {
-    GoogleMap
-  },
   data() {
     return {
       modalClass: "left",
@@ -40,7 +37,7 @@ export default {
 };
 </script>
 
-<style src="./popup_redlight.sass" lang="sass">
+<style src="./popup-timer.sass" lang="sass">
 
 
 </style>
