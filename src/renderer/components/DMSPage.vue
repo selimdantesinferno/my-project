@@ -349,7 +349,7 @@ import popup_timer from "./popup-timer";
            
          }
          // Algo fatigue
-         if(self.)
+         
 
       })
   .catch(function (error) {
