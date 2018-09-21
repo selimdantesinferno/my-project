@@ -325,7 +325,7 @@ import popup_timer from "./popup-timer";
                   self.vigilance=0;
          }
          
-         else
+         else;
           //do nothing
          
          
