@@ -6,7 +6,7 @@ Vue.use(Router)
 export default new Router({
   routes: [
     {
-      path: '/',
+      path: '/go',
       // path: '/',
       name: 'driving-page',
       component: require('@/components/DrivingPage').default
@@ -24,8 +24,7 @@ export default new Router({
       component: require('@/components/StartPage').default
     }, 
     {
-      path: '/go',
-      // path: '/dms',
+      path: '/dms',
       name: 'dms-page',
       component: require('@/components/DMSPage').default
     }, 
@@ -34,6 +33,12 @@ export default new Router({
       path: '/manual',
       name: 'manual',
       component: require('@/components/ManualPage').default
+    }, 
+    {
+      // path: '/',
+      path: '/images',
+      name: 'images',
+      component: require('@/components/Images').default
     }, 
     {
       path: '*',

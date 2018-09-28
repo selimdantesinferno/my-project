@@ -1,9 +1,9 @@
 <template>
 
   <div id="app">
-  	<video autoplay="" muted="" loop="" id="background_video">
+  	<!-- <video autoplay="" muted="" loop="" id="background_video">
   	  <source src="static/video/background_wave.mp4" type="video/mp4">
-  	</video>
+  	</video> -->
   	<div class="routerView">
   	  <router-view></router-view>
   	</div>

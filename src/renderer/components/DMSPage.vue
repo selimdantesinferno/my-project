@@ -23,8 +23,11 @@
           </div>
 
           <div class="row no-gutters position">
-            <div class="col text">
+            <div class="col text" @click="goto">
               Head Position
+              <div class="back">
+                <img src="static/images/back.png" alt="">
+              </div>
             </div>
             <div class="col headImage text-center">
               <img src="static/images/repere.png" class="head bordered"  alt="">
@@ -232,6 +235,9 @@ import popup_timer from "./popup-timer";
 
  methods:
   {
+    goto() {
+        this.$router.push ('images')
+      },
   request(){
   self=this;
   axios.get('http://localhost:5000/pull/car/biometrydata')

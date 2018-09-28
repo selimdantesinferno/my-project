@@ -1,0 +1,198 @@
+.contentDriving
+  display: flex;
+  height: 388px;
+  position: fixed;
+  width: 100%;
+.travelColumn
+  flex: 1 1 15%
+  display: flex
+  justify-content: space-around
+  flex-flow: column nowrap
+  position: relative
+  .line
+    height: 76%
+    width: 2px
+    background-image: linear-gradient(to top, transparent 50%, #223049 50%), linear-gradient(to top, #00acd7, #43debd)
+    background-size: 1px 6px, 100% 100%
+    border: none
+    border-radius: 70%
+    position: absolute
+    left: 35.2%
+
+  .travelPoint
+    flex: 0 1 15%
+    display: flex
+    justify-content: center
+    z-index: 1
+    .icon
+      flex: 0 1 11%
+      display: flex
+      img
+        margin: auto
+        height: 40%
+    .point
+      display: flex
+      flex: 0 1 15%
+      .dot
+        border: 2px solid #43debd
+        border-radius: 50%
+        width: 51%
+        margin: auto
+
+    &.center .point .dot
+      background-color: white
+      border: none
+      border-radius: 50%
+      width: 25%
+    &.destination .point .dot
+      border: 2px solid #00acd7
+      .dotinside
+        background-color: #00acd7
+        border-radius: 50%
+        margin: 18%
+    .info
+      flex: 0 1 40%
+      font-size: 9px
+      display: flex
+      flex-direction: column
+      justify-content: center
+      b
+        font-size: 13px
+  .mapColumn
+  display: flex
+  flex: 1 1 38%
+  font-size: 15px
+  > *
+  .durationColumn
+    flex: 0 1 20%
+    text-align: right
+    .duration
+      margin-top: 25%
+      .value
+        display: flex
+        align-items: baseline
+        justify-content: flex-end;
+        .number
+          font-size: 30px
+          font-weight: bold
+          margin-right: 5%
+
+  .mapContainerColumn
+    flex: 0 1 70%
+    display: flex
+    position: relative
+
+    .stroke1
+      width: 93%
+      height: auto
+      border: solid 1px #ffffff
+      border-radius: 43%
+      margin: auto
+      -webkit-animation: turnrigth linear 15s infinite;
+      // display: inline-table
+
+      .slime
+        width: 95%
+        background-image: linear-gradient(116deg, #9007c5, #00acd6 22%, #42ddbc 81%)
+        border-radius: 42%
+        margin-left: 3%
+
+        .slime1
+          width: 92%
+          transform: rotate(-293deg)
+          background-image: linear-gradient(#9007c5, #00acd6 35%, #42ddbc 80%)
+          border-radius: 40%
+          display: inline-block
+          margin-left: 4%
+          margin-top: -1%
+          -webkit-animation: turnleft linear 7s infinite, sizeBig linear 2s infinite;
+
+          .stroke
+            width: 111%
+            transform: rotate(250deg)
+            border: solid 0.5px #ffffff
+            border-radius: 44%
+            margin-left: -4%
+            margin-top: -1%
+
+    .googleMapDriving
+      width: 290px;
+      height: 290px;
+      left: 8%;
+      top: 13%;
+      display: grid
+      position: absolute
+      z-index: 2
+      .vue-map-container
+        .vue-map
+          border-radius: 50%
+
+
+  .distanceColumn
+    flex: 0 1 42%
+    display: flex
+    flex-direction: column
+    justify-content: space-between
+    .distance
+      margin-top: 11%;
+      .value
+        display: flex
+        align-items: baseline
+        .number
+          font-size: 30px
+          font-weight: bold
+          margin-right: 5%
+
+    .footprint
+      display: flex
+      flex-direction: column
+      margin-bottom: 15%
+      .text
+      .info
+        display: flex
+        justify-content: flex-start
+        align-items: baseline
+        .number
+          font-size: 30px
+          font-weight: bold
+          margin-right: 4%
+        .unit
+          font-size: 20px
+          margin-right: 7%
+        .icon
+          img
+            width: 12px
+
+
+.buttonColumn
+  flex: 1 1 32%
+  display: flex
+  flex-direction: column
+  justify-content: space-around
+  margin-right: 5%
+  .modeButtons
+    display: flex
+    justify-content: center
+    .button
+      width: 19%
+      display: flex
+      flex-direction: column
+      justify-content: center
+      align-items: center
+      margin-left: 20px
+      .roundedButton
+        border: 1px solid gray
+        width: 80%
+        margin-bottom: 8%
+        .icon
+          position: relative
+          img.image
+            position: absolute
+            top: 18%
+            left: 25%
+            width: 56%
+            border-radius: 0
+
+      .text
+        text-align: center
+        font-size: 75%

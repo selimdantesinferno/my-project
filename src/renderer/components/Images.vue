@@ -1,9 +1,9 @@
 <template>
-  <div class="container-fluid contentManual">
+  <div class="container-fluid contentImages" @click.left="back" @click.right="forward">
     <img :src="currentImage" alt="" class="ihm">
     <div class="row no-gutters">
-      <div class="col navigation back" @click="back"></div>
-      <div class="col navigation forward" @click="forward"></div>
+      <div class="col-2 navigation back" @click="goto"></div>
+      <div class="col navigation forward" ></div>
     </div>
     <!-- <div class="row no-gutters">
       <div class="col-2 camera camLeft"></div>
@@ -16,10 +16,10 @@
 
 <script>
   export default {
-    name: 'driving-page',
+    name: 'images',
     data () {
       return {
-        maxImg: 18,
+        maxImg: 15,
         currentImageIndex: 1
       }
     },
@@ -29,6 +29,10 @@
       }
     },
     methods: {
+      goto() {
+        if (this.currentImageIndex == 14)
+          this.$router.push ('dms')
+      },
       forward() {        
         if(this.currentImageIndex == this.maxImg)
           this.currentImageIndex = 0
@@ -39,10 +43,11 @@
           this.currentImageIndex = this.maxImg + 1
         this.currentImageIndex--
       }
-    }    
+    }
+    
   }
 </script>
 
- <style src="./manual_page.sass" lang="sass">
+ <style src="./images.sass" lang="sass">
 
  </style>
