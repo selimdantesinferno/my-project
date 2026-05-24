@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capcut-autoedit"
+version = "0.1.0"
+description = "영상에서 CapCut 데스크톱 편집 프로젝트를 자동 생성"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=0.3.0",
+    "yt-dlp>=2024.1.0",
+    "click>=8.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+capcut-autoedit = "capcut_autoedit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

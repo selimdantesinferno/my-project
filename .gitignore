@@ -1,10 +1,17 @@
 .DS_Store
-dist/electron/*
-dist/web/*
-build/*
-!build/icons
-node_modules/
-npm-debug.log
-npm-debug.log.*
 thumbs.db
-!.gitkeep
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.env
+.pytest_cache/
+# 작업/출력물
+*.mp4
+*.mov
+*.webm
+/out/
+/downloads/
