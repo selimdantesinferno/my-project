@@ -63,10 +63,25 @@ python cli.py --url https://example.com --upload instagram threads
 
 ## 주요 기능
 
+- **카드뉴스 자동 생성·발행** — 링크/본문 → AI 슬라이드 → 인스타·스레드 캐러셀
+- **영상 업로드** — 구글 드라이브 영상 → 유튜브 / 인스타 릴스 / 스레드 동영상 (틱톡은 미연동)
 - **즉시 발행** — 생성 후 선택한 플랫폼에 바로 업로드
 - **고정(첫) 댓글** — 발행 직후 첫 댓글 자동 등록 (예: "프로필 링크 확인")
 - **예약 발행** — 날짜·시간 지정(설정 시간대 기준), 백그라운드 스케줄러가 발행
-- **엑셀/CSV 대량 업로드** — 행마다 글감→생성→예약 등록 (샘플 양식 다운로드 제공)
+- **엑셀/CSV 대량 업로드** — 카드뉴스/영상 행을 섞어 등록 가능 (샘플 양식 제공)
+
+## 영상 업로드 (구글 드라이브 연동)
+
+1. 드라이브에서 영상 공유를 **"링크가 있는 모든 사용자"**로 변경 (영상 시연과 동일)
+2. 웹 UI **🎬 영상 업로드** 탭에서 드라이브 링크·제목·설명·플랫폼·공개상태 입력
+3. 즉시 발행 또는 예약
+
+- **인스타 릴스 / 스레드 동영상**: 드라이브 링크를 직접 다운로드 URL로 변환해 전달, 인코딩 완료까지 폴링 후 발행
+- **유튜브**: Data API v3로 파일을 내려받아 업로드 (OAuth2 — `YOUTUBE_CLIENT_ID/SECRET/REFRESH_TOKEN` 필요)
+- **틱톡**: 현재 미연동 (선택 시 안내 메시지 반환, 추후 TikTok Content Posting API 지원 예정)
+
+영상 대량 업로드 열: `type, video_url, title, description, targets, first_comment, privacy, scheduled_at`
+(`type=video` 또는 `video_url` 이 있으면 영상 잡으로 등록. 양식: `GET /api/bulk/sample?kind=video`)
 
 ### 대량 업로드 양식 (열)
 
@@ -83,8 +98,9 @@ python cli.py --url https://example.com --upload instagram threads
 | GET | `/` | 웹 UI |
 | GET | `/api/options` | 템플릿/톤/제공자 목록 |
 | POST | `/api/generate` | 글감 → 슬라이드 생성·렌더 |
-| POST | `/api/upload` | 즉시 발행 (고정 댓글 포함) |
-| POST | `/api/schedule` | 예약 발행 잡 등록 |
+| POST | `/api/upload` | 카드뉴스 즉시 발행 (고정 댓글 포함) |
+| POST | `/api/video` | 영상 업로드 (즉시/예약, 다중 플랫폼) |
+| POST | `/api/schedule` | 카드뉴스 예약 발행 잡 등록 |
 | GET | `/api/jobs` | 예약 잡 목록 |
 | POST | `/api/jobs/{id}/cancel` | 예약 취소 |
 | POST | `/api/bulk` | 엑셀/CSV 대량 등록 |

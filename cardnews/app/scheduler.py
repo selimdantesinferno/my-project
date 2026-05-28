@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from . import meta, store
+from . import meta, store, video
 
 log = logging.getLogger("scheduler")
 
@@ -17,13 +17,24 @@ _CHECK_INTERVAL = 20  # 초
 async def _publish_job(job: dict) -> None:
     await store.update_job(job["id"], status="publishing")
     try:
-        results = await meta.upload(
-            targets=job["targets"],
-            filenames=job["images"],
-            caption=job["caption"],
-            hashtags=job.get("hashtags", []),
-            first_comment=job.get("first_comment", ""),
-        )
+        if job.get("kind") == "video":
+            results = await video.upload_video(
+                targets=job["targets"],
+                video_url=job["video_url"],
+                title=job.get("title", ""),
+                description=job.get("description", ""),
+                first_comment=job.get("first_comment", ""),
+                privacy=job.get("privacy", "private"),
+                overrides=job.get("overrides", {}),
+            )
+        else:
+            results = await meta.upload(
+                targets=job["targets"],
+                filenames=job["images"],
+                caption=job["caption"],
+                hashtags=job.get("hashtags", []),
+                first_comment=job.get("first_comment", ""),
+            )
         await store.update_job(job["id"], status="done", result=results, error=None)
         log.info("발행 완료: %s", job["id"])
     except Exception as e:  # noqa: BLE001 - 잡 단위 격리

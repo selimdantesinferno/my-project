@@ -27,12 +27,25 @@ _ALIASES = {
     "first_comment": "first_comment", "고정댓글": "first_comment", "첫댓글": "first_comment",
     "scheduled_at": "scheduled_at", "예약시각": "scheduled_at", "시간": "scheduled_at",
     "provider": "provider", "ai": "provider",
+    # 영상 대량 업로드용
+    "type": "type", "kind": "type", "타입": "type", "종류": "type",
+    "video_url": "video_url", "drive_url": "video_url", "영상url": "video_url", "드라이브": "video_url",
+    "title": "title", "제목": "title",
+    "description": "description", "설명": "description",
+    "privacy": "privacy", "공개": "privacy", "공개상태": "privacy",
 }
 
 SAMPLE_HEADERS = [
     "url", "text", "slide_count", "template", "tone",
     "account", "prompt", "targets", "first_comment", "scheduled_at", "provider",
 ]
+
+VIDEO_SAMPLE_HEADERS = [
+    "type", "video_url", "title", "description", "targets",
+    "first_comment", "privacy", "scheduled_at",
+]
+
+_VIDEO_TARGETS = ("instagram", "threads", "youtube", "tiktok")
 
 
 def _norm_key(key: str) -> str | None:
@@ -71,13 +84,70 @@ def _clean_row(raw: dict) -> dict:
     return row
 
 
-def _split_targets(value: str) -> list[str]:
+def _split_targets(value: str, allowed: tuple[str, ...]) -> list[str]:
     parts = [p.strip().lower() for p in value.replace(";", ",").split(",")]
-    return [p for p in parts if p in ("instagram", "threads")]
+    return [p for p in parts if p in allowed]
+
+
+def _is_video_row(row: dict) -> bool:
+    return row.get("type", "").lower() in ("video", "영상") or bool(row.get("video_url"))
+
+
+async def _process_video_row(idx: int, row: dict) -> dict:
+    if not row.get("video_url"):
+        raise ValueError("video_url(드라이브 링크)이 없습니다.")
+    targets = _split_targets(row.get("targets", "instagram,threads,youtube"), _VIDEO_TARGETS)
+    if not targets:
+        raise ValueError("targets 에 영상 플랫폼이 없습니다.")
+    scheduled_at = timeutil.to_utc_iso(row.get("scheduled_at"))
+    job = await store.add_video_job(
+        scheduled_at=scheduled_at, targets=targets, video_url=row["video_url"],
+        title=row.get("title", ""), description=row.get("description", ""),
+        first_comment=row.get("first_comment", ""),
+        privacy=row.get("privacy", "private"),
+        label=row.get("title", "") or f"행 {idx}",
+    )
+    return {"row": idx, "ok": True, "kind": "video", "job_id": job["id"],
+            "scheduled_at": scheduled_at}
+
+
+async def _process_carousel_row(idx: int, row: dict) -> dict:
+    source = row.get("text", "")
+    if row.get("url"):
+        fetched = await fetch.fetch_url_text(row["url"])
+        source = f"{source}\n\n{fetched}".strip() if source else fetched
+    if not source:
+        raise ValueError("글감(text 또는 url)이 없습니다.")
+
+    targets = _split_targets(row.get("targets", "instagram,threads"), ("instagram", "threads"))
+    if not targets:
+        raise ValueError("targets 에 instagram/threads 가 없습니다.")
+
+    data = await ai.generate_slides(
+        source=source, slide_count=int(row.get("slide_count", 7)),
+        account=row.get("account", ""), user_prompt=row.get("prompt", ""),
+        provider=row.get("provider"),
+    )
+    images = render.render_deck(
+        data["slides"], row.get("template", "toss"),
+        row.get("tone", "blue"), row.get("account", ""),
+    )
+    scheduled_at = timeutil.to_utc_iso(row.get("scheduled_at"))
+    job = await store.add_job(
+        scheduled_at=scheduled_at, targets=targets, images=images,
+        caption=data.get("caption", ""), hashtags=data.get("hashtags", []),
+        first_comment=row.get("first_comment", ""),
+        label=row.get("account", "") or f"행 {idx}",
+    )
+    return {"row": idx, "ok": True, "kind": "carousel", "job_id": job["id"],
+            "scheduled_at": scheduled_at, "slides": len(images)}
 
 
 async def process(filename: str, content: bytes) -> dict:
-    """대량 파일을 처리하고 행별 결과 요약을 반환합니다."""
+    """대량 파일을 처리하고 행별 결과 요약을 반환합니다.
+
+    행의 type=video 또는 video_url 이 있으면 영상 잡, 그 외는 카드뉴스 잡으로 등록.
+    """
     raw_rows = _parse_rows(filename, content)
     results = []
     created = 0
@@ -85,38 +155,11 @@ async def process(filename: str, content: bytes) -> dict:
     for idx, raw in enumerate(raw_rows, start=1):
         row = _clean_row(raw)
         try:
-            source = row.get("text", "")
-            if row.get("url"):
-                fetched = await fetch.fetch_url_text(row["url"])
-                source = f"{source}\n\n{fetched}".strip() if source else fetched
-            if not source:
-                raise ValueError("글감(text 또는 url)이 없습니다.")
-
-            targets = _split_targets(row.get("targets", "instagram,threads"))
-            if not targets:
-                raise ValueError("targets 에 instagram/threads 가 없습니다.")
-
-            data = await ai.generate_slides(
-                source=source,
-                slide_count=int(row.get("slide_count", 7)),
-                account=row.get("account", ""),
-                user_prompt=row.get("prompt", ""),
-                provider=row.get("provider"),
-            )
-            images = render.render_deck(
-                data["slides"], row.get("template", "toss"),
-                row.get("tone", "blue"), row.get("account", ""),
-            )
-            scheduled_at = timeutil.to_utc_iso(row.get("scheduled_at"))
-            job = await store.add_job(
-                scheduled_at=scheduled_at, targets=targets, images=images,
-                caption=data.get("caption", ""), hashtags=data.get("hashtags", []),
-                first_comment=row.get("first_comment", ""),
-                label=row.get("account", "") or f"행 {idx}",
-            )
+            if _is_video_row(row):
+                results.append(await _process_video_row(idx, row))
+            else:
+                results.append(await _process_carousel_row(idx, row))
             created += 1
-            results.append({"row": idx, "ok": True, "job_id": job["id"],
-                            "scheduled_at": scheduled_at, "slides": len(images)})
         except Exception as e:  # noqa: BLE001 - 행 단위 격리
             results.append({"row": idx, "ok": False, "error": str(e)})
 
@@ -137,5 +180,18 @@ def sample_csv() -> str:
         "", "여기에 글감 본문을 직접 입력", "5", "magazine", "light",
         "@my_account", "통계 위주로 강조", "instagram", "",
         "", "gemini",
+    ])
+    return buf.getvalue()
+
+
+def video_sample_csv() -> str:
+    """영상 대량 업로드 샘플 CSV 문자열."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(VIDEO_SAMPLE_HEADERS)
+    w.writerow([
+        "video", "https://drive.google.com/file/d/FILE_ID/view", "4월 10일 업로드 테스트",
+        "이 영상은 테스트입니다", "youtube,instagram,threads",
+        "프로필 링크를 확인해 주세요", "public", "2026-06-01 09:00",
     ])
     return buf.getvalue()

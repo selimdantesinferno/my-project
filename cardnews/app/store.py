@@ -33,12 +33,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _save(job: dict) -> dict:
+    async with _lock:
+        jobs = _read()
+        jobs.append(job)
+        _write(jobs)
+    return job
+
+
 async def add_job(*, scheduled_at: str, targets: list[str], images: list[str],
                   caption: str, hashtags: list[str], first_comment: str = "",
                   label: str = "") -> dict:
-    """예약 잡 추가. scheduled_at 은 ISO8601(UTC) 문자열."""
-    job = {
+    """카드뉴스(이미지 캐러셀) 예약 잡 추가. scheduled_at 은 ISO8601(UTC)."""
+    return await _save({
         "id": uuid.uuid4().hex[:12],
+        "kind": "carousel",
         "status": "scheduled",
         "label": label,
         "scheduled_at": scheduled_at,
@@ -50,12 +59,31 @@ async def add_job(*, scheduled_at: str, targets: list[str], images: list[str],
         "created_at": _now_iso(),
         "result": None,
         "error": None,
-    }
-    async with _lock:
-        jobs = _read()
-        jobs.append(job)
-        _write(jobs)
-    return job
+    })
+
+
+async def add_video_job(*, scheduled_at: str, targets: list[str], video_url: str,
+                        title: str = "", description: str = "", first_comment: str = "",
+                        privacy: str = "private", overrides: dict | None = None,
+                        label: str = "") -> dict:
+    """영상 업로드 예약 잡 추가."""
+    return await _save({
+        "id": uuid.uuid4().hex[:12],
+        "kind": "video",
+        "status": "scheduled",
+        "label": label,
+        "scheduled_at": scheduled_at,
+        "targets": targets,
+        "video_url": video_url,
+        "title": title,
+        "description": description,
+        "first_comment": first_comment,
+        "privacy": privacy,
+        "overrides": overrides or {},
+        "created_at": _now_iso(),
+        "result": None,
+        "error": None,
+    })
 
 
 async def list_jobs() -> list[dict]:

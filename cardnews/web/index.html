@@ -36,6 +36,9 @@
   .status.ok { color:#51cf66; }
   .empty { color:var(--sub); text-align:center; margin-top:80px; }
   .hint { font-size:12px; color:var(--sub); margin-top:4px; }
+  .tabs { display:flex; gap:8px; margin-bottom:8px; }
+  .tab { width:auto; flex:1; margin:0; background:var(--card); border:1px solid var(--line); color:var(--sub); padding:10px; font-size:14px; }
+  .tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 </style>
 </head>
 <body>
@@ -47,6 +50,12 @@
 <div class="wrap">
   <!-- 입력 패널 -->
   <div class="panel left">
+    <div class="tabs">
+      <button class="tab active" data-tab="card">🖼️ 카드뉴스</button>
+      <button class="tab" data-tab="video">🎬 영상 업로드</button>
+    </div>
+
+  <div id="tab-card">
     <label>링크 (선택)</label>
     <input id="url" placeholder="https://... 글감으로 쓸 페이지 주소" />
 
@@ -94,7 +103,59 @@
       <button id="sample-btn" class="sec" style="margin-top:0">📥 샘플 양식</button>
     </div>
     <div class="status" id="bulk-status"></div>
-  </div>
+  </div><!-- /tab-card -->
+
+  <div id="tab-video" style="display:none">
+    <label style="margin-top:0">구글 드라이브 영상 링크</label>
+    <input id="v_url" placeholder="https://drive.google.com/file/d/.../view" />
+    <div class="hint">드라이브 공유를 '링크가 있는 모든 사용자'로 설정하세요.</div>
+
+    <label>제목</label>
+    <input id="v_title" placeholder="예: 4월 10일 업로드 테스트" />
+
+    <label>설명</label>
+    <textarea id="v_desc" rows="3" placeholder="이 영상은 테스트입니다"></textarea>
+
+    <label>고정(첫) 댓글</label>
+    <input id="v_comment" placeholder="예: 프로필 링크를 확인해 주세요" />
+
+    <label>플랫폼</label>
+    <div class="upload-row" id="v_targets">
+      <label><input type="checkbox" value="youtube" checked /> 유튜브</label>
+      <label><input type="checkbox" value="instagram" checked /> 인스타(릴스)</label>
+      <label><input type="checkbox" value="threads" checked /> 스레드</label>
+      <label><input type="checkbox" value="tiktok" /> 틱톡</label>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>유튜브 공개 상태</label>
+        <select id="v_privacy">
+          <option value="public">공개</option>
+          <option value="unlisted">일부공개</option>
+          <option value="private" selected>비공개</option>
+        </select>
+      </div>
+      <div>
+        <label>예약 시각 (비우면 즉시)</label>
+        <input id="v_sched" type="datetime-local" />
+      </div>
+    </div>
+
+    <button id="v-btn">🚀 영상 발행 / 예약</button>
+    <div class="status" id="v-status"></div>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:28px 0" />
+    <label style="margin-top:0">📊 영상 대량 업로드 (엑셀/CSV)</label>
+    <div class="hint">type=video, video_url(드라이브), targets 등. 예약시각 비우면 즉시.</div>
+    <input id="v-bulk-file" type="file" accept=".csv,.xlsx" style="margin-top:8px" />
+    <div class="row" style="margin-top:8px">
+      <button id="v-bulk-btn" class="sec" style="margin-top:0">⬆️ 대량 등록</button>
+      <button id="v-sample-btn" class="sec" style="margin-top:0">📥 샘플 양식</button>
+    </div>
+    <div class="status" id="v-bulk-status"></div>
+  </div><!-- /tab-video -->
+  </div><!-- /panel left -->
 
   <!-- 결과 패널 -->
   <div class="panel right">
@@ -269,6 +330,76 @@ document.getElementById('bulk-btn').onclick = async () => {
   const st = document.getElementById('bulk-status');
   if (!f) { st.className = 'status err'; st.textContent = '❌ 파일을 선택하세요.'; return; }
   st.className = 'status'; st.textContent = '⏳ 대량 처리 중... (행마다 AI 생성/렌더)';
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const r = await fetch('/api/bulk', {method:'POST', body:fd});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '실패');
+    const fails = d.results.filter(x => !x.ok);
+    st.className = fails.length ? 'status' : 'status ok';
+    st.textContent = `✅ ${d.created}/${d.total}건 등록`
+      + (fails.length ? '\n실패: ' + fails.map(x => `행${x.row}: ${x.error}`).join('; ') : '');
+    loadJobs();
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  }
+};
+
+// 탭 전환
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const v = t.dataset.tab === 'video';
+    document.getElementById('tab-card').style.display = v ? 'none' : 'block';
+    document.getElementById('tab-video').style.display = v ? 'block' : 'none';
+  };
+});
+
+function videoTargets() {
+  return [...document.querySelectorAll('#v_targets input:checked')].map(c => c.value);
+}
+
+document.getElementById('v-btn').onclick = async () => {
+  const st = document.getElementById('v-status');
+  const targets = videoTargets();
+  if (!document.getElementById('v_url').value.trim()) {
+    st.className = 'status err'; st.textContent = '❌ 드라이브 영상 링크를 입력하세요.'; return;
+  }
+  if (!targets.length) { st.className='status err'; st.textContent='❌ 플랫폼을 선택하세요.'; return; }
+  const when = document.getElementById('v_sched').value.replace('T', ' ');
+  st.className = 'status'; st.textContent = when ? '⏳ 예약 등록 중...' : '⏳ 영상 업로드 중... (인코딩 대기로 수 분 소요될 수 있음)';
+  try {
+    const r = await fetch('/api/video', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        targets, video_url: document.getElementById('v_url').value,
+        title: document.getElementById('v_title').value,
+        description: document.getElementById('v_desc').value,
+        first_comment: document.getElementById('v_comment').value,
+        privacy: document.getElementById('v_privacy').value,
+        scheduled_at: when, label: document.getElementById('v_title').value,
+      })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '실패');
+    st.className = 'status ok';
+    st.textContent = d.scheduled
+      ? '✅ 예약 등록 완료 (' + d.job.id + ')'
+      : '✅ 발행 완료\n' + d.results.map(x => `${x.platform}: ${x.id}`).join('\n');
+    loadJobs();
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  }
+};
+
+document.getElementById('v-sample-btn').onclick = () => { window.location = '/api/bulk/sample?kind=video'; };
+
+document.getElementById('v-bulk-btn').onclick = async () => {
+  const f = document.getElementById('v-bulk-file').files[0];
+  const st = document.getElementById('v-bulk-status');
+  if (!f) { st.className='status err'; st.textContent='❌ 파일을 선택하세요.'; return; }
+  st.className = 'status'; st.textContent = '⏳ 대량 처리 중...';
   try {
     const fd = new FormData(); fd.append('file', f);
     const r = await fetch('/api/bulk', {method:'POST', body:fd});

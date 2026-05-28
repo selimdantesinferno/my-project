@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     ig_user_id: str = ""
     ig_access_token: str = ""
 
+    # YouTube Data API (OAuth2) - 영상 업로드용
+    youtube_client_id: str = ""
+    youtube_client_secret: str = ""
+    youtube_refresh_token: str = ""
+
     @property
     def base_url(self) -> str:
         return self.public_base_url.rstrip("/")

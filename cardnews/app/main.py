@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, bulk, fetch, meta, render, scheduler, store, timeutil
+from . import ai, bulk, fetch, meta, render, scheduler, store, timeutil, video
 from .config import OUTPUT_DIR, WEB_DIR, settings
 from .templates import TEMPLATES, TONES
 
@@ -63,6 +63,18 @@ class ScheduleRequest(BaseModel):
     label: str = ""
 
 
+class VideoRequest(BaseModel):
+    targets: list[str]      # instagram, threads, youtube, tiktok
+    video_url: str          # 구글 드라이브 공유 링크 또는 직접 URL
+    title: str = ""
+    description: str = ""
+    first_comment: str = ""
+    privacy: str = "private"           # youtube: public|unlisted|private
+    overrides: dict = {}               # 플랫폼별 개별 설정
+    scheduled_at: str = ""             # 비우면 즉시 발행
+    label: str = ""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
@@ -78,6 +90,7 @@ async def options() -> dict:
         "providers": ["openai", "gemini"],
         "default_provider": settings.ai_provider,
         "default_prompt": ai.DEFAULT_PROMPT,
+        "video_platforms": ["instagram", "threads", "youtube", "tiktok"],
     }
 
 
@@ -157,6 +170,38 @@ async def schedule(req: ScheduleRequest) -> dict:
     return {"job": job}
 
 
+@app.post("/api/video")
+async def video_upload(req: VideoRequest) -> dict:
+    """영상 업로드. scheduled_at 이 있으면 예약, 없으면 즉시 발행."""
+    if not req.targets:
+        raise HTTPException(400, "업로드 대상(targets)을 지정하세요.")
+    if not req.video_url.strip():
+        raise HTTPException(400, "영상 URL(구글 드라이브 링크)을 입력하세요.")
+
+    if req.scheduled_at.strip():
+        try:
+            scheduled_at = timeutil.to_utc_iso(req.scheduled_at)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        job = await store.add_video_job(
+            scheduled_at=scheduled_at, targets=req.targets, video_url=req.video_url,
+            title=req.title, description=req.description,
+            first_comment=req.first_comment, privacy=req.privacy,
+            overrides=req.overrides, label=req.label or req.title,
+        )
+        return {"scheduled": True, "job": job}
+
+    try:
+        results = await video.upload_video(
+            targets=req.targets, video_url=req.video_url, title=req.title,
+            description=req.description, first_comment=req.first_comment,
+            privacy=req.privacy, overrides=req.overrides,
+        )
+    except video.UploadError as e:
+        raise HTTPException(502, str(e))
+    return {"scheduled": False, "results": results}
+
+
 @app.get("/api/jobs")
 async def jobs() -> dict:
     return {"jobs": await store.list_jobs()}
@@ -181,10 +226,14 @@ async def bulk_upload(file: UploadFile = File(...)) -> dict:
 
 
 @app.get("/api/bulk/sample")
-async def bulk_sample() -> PlainTextResponse:
+async def bulk_sample(kind: str = "carousel") -> PlainTextResponse:
+    if kind == "video":
+        body, fname = bulk.video_sample_csv(), "bulk_video_sample.csv"
+    else:
+        body, fname = bulk.sample_csv(), "bulk_sample.csv"
     return PlainTextResponse(
-        bulk.sample_csv(),
-        headers={"Content-Disposition": "attachment; filename=bulk_sample.csv"},
+        body,
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
         media_type="text/csv",
     )
 
