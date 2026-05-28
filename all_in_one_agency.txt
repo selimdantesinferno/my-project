@@ -12709,7 +12709,7 @@ class AgencyUploadPage(QWidget):
     def _tb_quote(self):
         cur = self.body_editor.textCursor()
         if cur.hasSelection():
-            text = cur.selectedText().replace(' ', '\n')
+            text = cur.selectedText().replace('\u2029', '\n')
             new = '\n'.join(('> ' + l) if l.strip() else l for l in text.split('\n'))
             cur.insertText(new)
         else:
@@ -12718,7 +12718,7 @@ class AgencyUploadPage(QWidget):
     def _tb_bold(self):
         cur = self.body_editor.textCursor()
         if cur.hasSelection():
-            text = cur.selectedText().replace(' ', '\n')
+            text = cur.selectedText().replace('\u2029', '\n')
             cur.insertText(f"**{text}**")
         else:
             cur.insertText("****")
