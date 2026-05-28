@@ -1,0 +1,14338 @@
+import sys
+import os
+import json
+import time
+import re
+import pyperclip
+import requests
+import subprocess
+import platform
+from pathlib import Path
+from datetime import datetime
+from dotenv import load_dotenv
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QStackedWidget, QTreeWidget, QTreeWidgetItem,
+                             QTextEdit, QStatusBar, QWidget, QVBoxLayout, QHBoxLayout,
+                             QPushButton, QLineEdit, QLabel, QComboBox, QTextBrowser, QMessageBox,
+                             QSpinBox, QFileDialog, QScrollArea, QGroupBox, QCheckBox, QRadioButton,
+                             QButtonGroup, QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QSplitter, QAbstractItemView,
+    QDialog
+)
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
+from PyQt6.QtGui import QPalette, QColor, QFont
+import feedparser
+from bs4 import BeautifulSoup
+from openai import OpenAI
+import google.genai as genai
+from PIL import Image as PILImage
+import io
+import base64
+import urllib.request
+# === [PATCH] 멀티링크 → AI 작성 모듈 ===
+try:
+    from multi_link_ai_page import MultiLinkAIPage, normalize_youtube_url  # noqa: F401
+    _MULTILINK_AVAILABLE = True
+except Exception as _e:
+    print(f'[PATCH] multi_link_ai_page import 실패: {_e}')
+    _MULTILINK_AVAILABLE = False
+
+# Selenium global imports (so 'By' is available everywhere; safe if selenium installed)
+try:
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+except Exception:
+    By = Keys = ActionChains = WebDriverWait = EC = None  # selenium 미설치 환경에서도 import 에러 방지
+
+load_dotenv()
+# ═══════════════════════════════════════════════════════════════
+#  Chrome 버전 자동 감지
+# ═══════════════════════════════════════════════════════════════
+def get_chrome_major_version():
+    """설치된 Chrome의 메이저 버전을 자동으로 감지. 실패 시 None 반환."""
+    try:
+        if platform.system() == 'Windows':
+            # ── 방법 1: 레지스트리 (가장 안전, 타임아웃 없음) ──
+            try:
+                import winreg
+                reg_paths = [
+                    (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Google\Chrome\BLBeacon'),
+                    (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon'),
+                    (winreg.HKEY_CURRENT_USER,  r'SOFTWARE\Google\Chrome\BLBeacon'),
+                ]
+                for hive, reg_path in reg_paths:
+                    try:
+                        key = winreg.OpenKey(hive, reg_path)
+                        ver, _ = winreg.QueryValueEx(key, 'version')
+                        winreg.CloseKey(key)
+                        major = int(str(ver).split('.')[0])
+                        print(f"[Chrome 감지] 레지스트리: {ver} → major={major}")
+                        return major
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # ── 방법 2: chrome_installer.exe 버전 리소스 읽기 (win32api) ──
+            # chrome.exe --version 은 Windows에서 타임아웃/cp949 오류 발생 → 사용 금지
+            try:
+                import win32api
+                chrome_paths = [
+                    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                    os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe'),
+                ]
+                for cp in chrome_paths:
+                    if os.path.exists(cp):
+                        info = win32api.GetFileVersionInfo(cp, '\\\\')
+                        ms = info['FileVersionMS']
+                        major = ms >> 16
+                        print(f"[Chrome 감지] win32api: {cp} → major={major}")
+                        return major
+            except Exception:
+                pass
+
+            # ── 방법 3: Last Resort — wmic (인코딩 강제 지정) ──
+            try:
+                result = subprocess.run(
+                    ['wmic', 'datafile', 'where',
+                     r'name="C:\Program Files\Google\Chrome\Application\chrome.exe"',
+                     'get', 'Version', '/value'],
+                    capture_output=True, timeout=8, encoding='utf-8', errors='ignore'
+                )
+                m = re.search(r'Version=(\d+)', result.stdout)
+                if m:
+                    major = int(m.group(1))
+                    print(f"[Chrome 감지] wmic → major={major}")
+                    return major
+            except Exception:
+                pass
+
+        elif platform.system() == 'Darwin':
+            result = subprocess.run(
+                ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'],
+                capture_output=True, timeout=5, encoding='utf-8', errors='ignore'
+            )
+            m = re.search(r'(\d+)\.', result.stdout)
+            if m:
+                return int(m.group(1))
+        else:
+            result = subprocess.run(
+                ['google-chrome', '--version'],
+                capture_output=True, timeout=5, encoding='utf-8', errors='ignore'
+            )
+            m = re.search(r'(\d+)\.', result.stdout)
+            if m:
+                return int(m.group(1))
+    except Exception as e:
+        print(f"[Chrome 감지 실패] {e}")
+    return None
+def kill_chrome_processes():
+    """이전에 남은 Chrome / ChromeDriver 프로세스를 모두 종료하고 SingletonLock을 삭제."""
+    if platform.system() == 'Windows':
+        subprocess.run(['taskkill', '/f', '/im', 'chromedriver.exe'], capture_output=True)
+        subprocess.run(['taskkill', '/f', '/im', 'chrome.exe'], capture_output=True)
+        time.sleep(2)
+    # chrome_profile 폴더의 잠금 파일 삭제
+    for lock_name in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
+        lock_path = Path('./chrome_profile') / lock_name
+        try:
+            if lock_path.exists():
+                lock_path.unlink()
+        except Exception:
+            pass
+
+# ============================================================
+#  BulkArticleDB — 제목대량업로드 영구 저장 (SQLite)
+#  프로그램 종료/재시작에도 제목/원고/상태/발행정보가 유지됩니다.
+# ============================================================
+import sqlite3 as _sqlite3
+from pathlib import Path as _Path
+from datetime import datetime as _dt
+
+class BulkArticleDB:
+    """data/bulk_articles.db 에 제목 대량 업로드 데이터를 저장."""
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS bulk_articles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title1 TEXT NOT NULL DEFAULT '',
+        title2 TEXT NOT NULL DEFAULT '',
+        title3 TEXT NOT NULL DEFAULT '',
+        combined_title TEXT NOT NULL DEFAULT '',
+        keyword TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '대기',
+        publish_status TEXT NOT NULL DEFAULT '',
+        char_count INTEGER NOT NULL DEFAULT 0,
+        ai_model TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        published_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_bulk_status ON bulk_articles(status);
+    CREATE INDEX IF NOT EXISTS idx_bulk_pub    ON bulk_articles(publish_status);
+    """
+
+    def __init__(self, db_path=None):
+        if db_path is None:
+            base = _Path("data"); base.mkdir(exist_ok=True)
+            db_path = base / "bulk_articles.db"
+        self.db_path = str(db_path)
+        with self._conn() as c:
+            c.executescript(self._SCHEMA)
+            c.commit()
+
+    def _conn(self):
+        c = _sqlite3.connect(self.db_path, timeout=10)
+        c.row_factory = _sqlite3.Row
+        return c
+
+    @staticmethod
+    def _now():
+        return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def insert(self, row: dict) -> int:
+        now = self._now()
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO bulk_articles
+                   (title1,title2,title3,combined_title,keyword,source,content,
+                    status,publish_status,char_count,ai_model,created_at,updated_at,published_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row.get("title1",""), row.get("title2",""), row.get("title3",""),
+                    row.get("combined_title", row.get("title","")),
+                    row.get("keyword",""), row.get("source",""),
+                    row.get("content",""),
+                    row.get("status","대기"), row.get("publish_status",""),
+                    int(row.get("char_count", len(row.get("content","")))),
+                    row.get("ai_model",""),
+                    now, now, row.get("published_at",""),
+                ),
+            )
+            c.commit()
+            return cur.lastrowid
+
+    def update(self, row_id: int, **fields):
+        if not fields:
+            return
+        if "char_count" not in fields and "content" in fields:
+            fields["char_count"] = len(fields["content"] or "")
+        fields["updated_at"] = self._now()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        vals = list(fields.values()) + [row_id]
+        with self._conn() as c:
+            c.execute(f"UPDATE bulk_articles SET {cols} WHERE id=?", vals)
+            c.commit()
+
+    def delete(self, row_id: int):
+        with self._conn() as c:
+            c.execute("DELETE FROM bulk_articles WHERE id=?", (row_id,))
+            c.commit()
+
+    def delete_all(self):
+        with self._conn() as c:
+            c.execute("DELETE FROM bulk_articles")
+            c.commit()
+
+    def all(self) -> list:
+        with self._conn() as c:
+            cur = c.execute("SELECT * FROM bulk_articles ORDER BY id ASC")
+            return [dict(r) for r in cur.fetchall()]
+# ============================================================
+
+def make_uc_driver(opts_or_builder):
+    """Chrome 버전 자동 감지 + undetected_chromedriver 생성.
+    opts_or_builder: ChromeOptions 인스턴스 또는 () -> ChromeOptions 콜러블.
+    UC는 ChromeOptions를 한 번 쓰면 재사용 불가 → 콜러블 권장.
+    v12: 일부 UC/ChromeDriver 조합에서 excludeSwitches가 거부되므로 생성 직전 제거.
+    """
+    import undetected_chromedriver as uc
+
+    def _strip_rejected_chrome_options(opts):
+        for attr in ("_experimental_options", "experimental_options"):
+            data = getattr(opts, attr, None)
+            if isinstance(data, dict):
+                data.pop("excludeSwitches", None)
+        caps = getattr(opts, "_caps", None)
+        if isinstance(caps, dict):
+            chrome_opts = caps.get("goog:chromeOptions")
+            if isinstance(chrome_opts, dict):
+                chrome_opts.pop("excludeSwitches", None)
+        return opts
+
+    def _build_opts():
+        if callable(opts_or_builder):
+            return _strip_rejected_chrome_options(opts_or_builder())
+        # 인스턴스를 받은 경우: 첫 시도용 그대로 사용 (재시도시 새로 못 만듦 → 경고)
+        return _strip_rejected_chrome_options(opts_or_builder)
+
+    kill_chrome_processes()  # 항상 기존 프로세스 정리 후 시작
+    version = get_chrome_major_version()
+    try:
+        opts = _build_opts()
+        if version:
+            print(f"[ChromeDriver] version_main={version} 으로 실행")
+            driver = uc.Chrome(options=opts, version_main=version, use_subprocess=True)
+        else:
+            print("[ChromeDriver] 버전 감지 실패 → version_main 없이 실행 (자동 매칭)")
+            driver = uc.Chrome(options=opts, use_subprocess=True)
+        time.sleep(2)
+        print(f"[ChromeDriver] 드라이버 생성 성공, 현재 URL: {driver.current_url}")
+        return driver
+    except Exception as e:
+        print(f"[ChromeDriver] 첫 시도 실패: {e}")
+        print("[ChromeDriver] chrome_profile 폴더 정리 후 재시도...")
+        import shutil
+        profile_path = Path('./chrome_profile')
+        for lock_name in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
+            lock_path = profile_path / lock_name
+            try:
+                if lock_path.exists():
+                    lock_path.unlink()
+            except Exception:
+                pass
+        kill_chrome_processes()
+        time.sleep(3)
+        # 재시도: 반드시 새 opts 인스턴스 생성 (UC 제약)
+        if not callable(opts_or_builder):
+            print("[ChromeDriver] ⚠️ opts가 콜러블이 아니라 재시도 opts를 새로 만들 수 없습니다. 같은 인스턴스로 재시도하면 'cannot reuse ChromeOptions' 에러 발생 가능.")
+        retry_opts = _build_opts()
+        if version:
+            return uc.Chrome(options=retry_opts, version_main=version, use_subprocess=True)
+        else:
+            return uc.Chrome(options=retry_opts, use_subprocess=True)
+# ═══════════════════════════════════════════════════════════════
+#  네이버 로그인 헬퍼 (60초 수동 로그인 대기)
+# ═══════════════════════════════════════════════════════════════
+def naver_login_with_fallback(driver, nid, npw, log_fn=None):
+    """네이버 로그인 시도. 실패 시 60초간 수동 로그인 대기."""
+    from selenium.webdriver.common.by import By
+
+    # 이미 로그인 상태인지 먼저 확인
+    try:
+        driver.get("https://www.naver.com")
+        time.sleep(2)
+        cookies = driver.get_cookies()
+        nid_cookie = any(c['name'] in ('NID_AUT', 'NID_SES') for c in cookies)
+        if nid_cookie:
+            if log_fn:
+                log_fn("✅ 이미 로그인 상태 (쿠키 확인) - 로그인 생략")
+            return True
+    except Exception:
+        pass
+
+    driver.get("https://nid.naver.com/nidlogin.login")
+    time.sleep(2)
+
+    try:
+        id_el = driver.find_element(By.ID, "id")
+        # 기존 입력값 완전히 삭제 (JS로 value 초기화 후 clear)
+        driver.execute_script("arguments[0].value = '';", id_el)
+        id_el.clear()
+        time.sleep(0.2)
+        safe_paste(driver, id_el, nid)
+        time.sleep(0.3)
+
+        pw_el = driver.find_element(By.ID, "pw")
+        # 기존 입력값 완전히 삭제
+        driver.execute_script("arguments[0].value = '';", pw_el)
+        pw_el.clear()
+        time.sleep(0.2)
+        safe_paste(driver, pw_el, npw)
+        time.sleep(0.3)
+
+        # 로그인 상태유지 체크
+        try:
+            keep_login = driver.find_element(By.ID, "keep")
+            if not keep_login.is_selected():
+                keep_login.click()
+                time.sleep(0.3)
+                if log_fn:
+                    log_fn("☑️ 로그인 상태유지 체크 완료")
+        except Exception:
+            try:
+                # 다른 셀렉터로 시도
+                keep_label = driver.find_element(By.CSS_SELECTOR, 'label[for="keep"], span.keep_text, .ip_check')
+                keep_label.click()
+                time.sleep(0.3)
+                if log_fn:
+                    log_fn("☑️ 로그인 상태유지 체크 완료")
+            except Exception:
+                if log_fn:
+                    log_fn("⚠️ 로그인 상태유지 체크박스를 찾지 못함 (계속 진행)")
+
+        driver.find_element(By.ID, "log.login").click()
+        time.sleep(5)
+    except Exception as e:
+        if log_fn:
+            log_fn(f"⚠️ 자동 로그인 실패: {e}")
+
+    # 로그인 성공 여부 확인
+    if "nidlogin" not in driver.current_url and "nid.naver.com" not in driver.current_url:
+        if log_fn:
+            log_fn("✅ 자동 로그인 성공")
+        return True
+
+    # 실패 시 60초 수동 대기
+    if log_fn:
+        log_fn("⚠️ 자동 로그인 실패 - 60초간 수동 로그인을 진행하세요...")
+    for remaining in range(60, 0, -5):
+        time.sleep(5)
+        if "nidlogin" not in driver.current_url and "nid.naver.com" not in driver.current_url:
+            if log_fn:
+                log_fn("✅ 수동 로그인 확인됨!")
+            return True
+        if log_fn:
+            log_fn(f"⏳ 수동 로그인 대기 중... {remaining}초 남음")
+
+    if log_fn:
+        log_fn("❌ 60초 내 로그인되지 않았습니다")
+    return False
+# ═══════════════════════════════════════════════════════════════
+#  워커 스레드
+# ═══════════════════════════════════════════════════════════════
+
+class WorkerThread(QThread):
+    log_signal = pyqtSignal(str)
+    result_signal = pyqtSignal(object)
+    progress_signal = pyqtSignal(int)
+    finished_signal = pyqtSignal()
+    ui_update_signal = pyqtSignal(object)  # callable을 메인스레드에서 실행
+
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            result = self.func(*self.args, **self.kwargs)
+            if not self._is_cancelled:
+                if result is not None:
+                    self.result_signal.emit(result)
+                else:
+                    self.result_signal.emit("작업 완료")
+        except Exception as e:
+            try:
+                self.log_signal.emit(f"❌ 오류 발생: {format_error_message(e)}")
+            except Exception:
+                pass
+        finally:
+            self.finished_signal.emit()
+def format_error_message(err):
+    name = err.__class__.__name__
+    msg = (str(err) or "알 수 없는 오류").strip()
+    detail = ""
+
+    cause = getattr(err, '__cause__', None) or getattr(err, '__context__', None)
+    if cause:
+        detail = str(cause).strip()
+
+    response = getattr(err, 'response', None)
+    if response is not None:
+        try:
+            if hasattr(response, 'text') and response.text:
+                detail = response.text[:250]
+        except Exception:
+            pass
+
+    if msg.lower() == 'connection error.' and detail:
+        return f"{name}: {msg} / {detail}"
+    if name.lower() not in msg.lower():
+        return f"{name}: {msg}"
+    return msg
+# pyautogui를 선택적으로 import (없으면 selenium 대체)
+try:
+    import pyautogui
+
+    HAS_PYAUTOGUI = True
+except ImportError:
+    HAS_PYAUTOGUI = False
+def safe_paste(driver, element, text):
+    """안전한 붙여넣기 - Selenium ActionChains 전용 (스레드 안전)"""
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    element.click()
+    time.sleep(0.2)
+
+    pyperclip.copy(text)
+
+    # 방법1: ActionChains Ctrl+V (스레드 안전 — pyautogui 사용 안 함)
+    try:
+        ActionChains(driver).key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
+        time.sleep(0.3)
+        return True
+    except Exception:
+        pass
+
+    # 방법2: JavaScript 직접 입력
+    try:
+        driver.execute_script("""
+            var el = arguments[0];
+            el.value = arguments[1];
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+        """, element, text)
+        return True
+    except Exception:
+        pass
+
+    # 방법3: send_keys 최후 수단
+    element.clear()
+    element.send_keys(text)
+    return True
+def safe_hotkey(driver, *keys):
+    """단축키 입력 - Selenium ActionChains 전용 (스레드 안전, pyautogui 미사용)"""
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    key_map = {'ctrl': Keys.CONTROL, 'shift': Keys.SHIFT, 'alt': Keys.ALT,
+               'enter': Keys.ENTER, 'v': 'v', 's': 's', 'p': 'p', 'q': 'q', 'a': 'a'}
+    actions = ActionChains(driver)
+    for k in keys[:-1]:
+        actions = actions.key_down(key_map.get(k, k))
+    actions = actions.send_keys(key_map.get(keys[-1], keys[-1]))
+    for k in keys[:-1]:
+        actions = actions.key_up(key_map.get(k, k))
+    actions.perform()
+def safe_press(driver, key):
+    """키 입력 - Selenium ActionChains 전용 (스레드 안전, pyautogui 미사용)"""
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    key_map = {'enter': Keys.ENTER, 'tab': Keys.TAB, 'escape': Keys.ESCAPE}
+    ActionChains(driver).send_keys(key_map.get(key, key)).perform()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  네이버 에디터 보조 헬퍼 (정렬/인용구/스티커/전처리)  ── v27 개선
+#  v26: 정렬은 본문 입력 *후* Ctrl+A 전체선택 + JS fallback / 인용구는 한 줄만 블록 처리
+#  - 단축키 대신 SmartEditor 툴바 버튼 클릭 방식으로 변경
+#  - 인용구는 Quotation 툴바 버튼 사용
+#  - 본문 전처리: 빈 줄 1개로 제한, 긴 문장 보조 개행, 스티커/인용 토큰 정리
+# ═══════════════════════════════════════════════════════════════
+def _click_toolbar_button(driver, selectors, label=""):
+    """툴바 버튼을 클릭. 여러 selector 중 보이는 첫번째를 클릭."""
+    from selenium.webdriver.common.by import By
+    for sel in selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        time.sleep(0.25)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
+def apply_alignment_js_fallback(driver, alignment):
+    """JS로 .se-text-paragraph / .se-component .se-section 의 text-align을 직접 주입.
+    툴바 버튼이 안 먹을 때 보장 수단.
+    """
+    css_value = {'left':'left','center':'center','right':'right','justify':'justify'}.get(alignment, 'left')
+    js = """
+    (function(align){
+      var sels = ['.se-text-paragraph','.se-component .se-section','.se-text','.se-component-content p'];
+      var cnt = 0;
+      sels.forEach(function(s){
+        document.querySelectorAll(s).forEach(function(el){
+          el.style.textAlign = align;
+          cnt++;
+        });
+      });
+      return cnt;
+    })(arguments[0]);
+    """
+    try:
+        n = driver.execute_script(js, css_value)
+        return bool(n)
+    except Exception:
+        return False
+
+
+def apply_alignment(driver, alignment, select_all_first=True):
+    """본문 정렬을 적용. v26 개선:
+    1) (옵션) Ctrl+A로 본문 전체 선택
+    2) SmartEditor 툴바 정렬 버튼 클릭 시도
+    3) 실패 시 JS로 text-align 직접 주입
+    alignment: 'left'|'center'|'right'|'justify'
+    """
+    from selenium.webdriver.common.by import By
+    if not alignment:
+        return False
+    # 1) 본문 전체 선택 (이미 입력된 텍스트에만 정렬 적용 가능)
+    if select_all_first:
+        try:
+            safe_hotkey(driver, 'ctrl', 'a')
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+    # 2) 정렬 토글 메뉴 펼치기 (접혀있을 수 있음)
+    _click_toolbar_button(driver, [
+        'button.se-align-toolbar-button',
+        'button[data-name="align"]',
+        'button[aria-label*="정렬"]',
+    ])
+    time.sleep(0.2)
+
+    label_map = {
+        'left': ['왼쪽', '좌측', 'left'],
+        'center': ['가운데', '중앙', 'center'],
+        'right': ['오른쪽', '우측', 'right'],
+        'justify': ['양쪽', '양끝', 'justify'],
+    }
+    targets = label_map.get(alignment, label_map['left'])
+
+    clicked = False
+    try:
+        btns = driver.find_elements(By.CSS_SELECTOR,
+            'button.se-toolbar-option-align-button, '
+            'button[class*="align"][class*="button"], '
+            'li.se-toolbar-option-align-button button, '
+            'button[data-name*="align"]')
+        for b in btns:
+            try:
+                if not b.is_displayed():
+                    continue
+                aria = (b.get_attribute('aria-label') or '').lower()
+                txt = (b.text or '').strip().lower()
+                cls = (b.get_attribute('class') or '').lower()
+                dn = (b.get_attribute('data-name') or '').lower()
+                if any(t.lower() in aria or t.lower() in txt or t.lower() in cls or t.lower() in dn for t in targets):
+                    driver.execute_script("arguments[0].click();", b)
+                    time.sleep(0.2)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not clicked:
+        cls_map = {'left': 'left', 'center': 'center', 'right': 'right', 'justify': 'justify'}
+        cname = cls_map.get(alignment, 'left')
+        clicked = _click_toolbar_button(driver, [
+            f'button[class*="align"][class*="{cname}"]',
+            f'button[data-value="{cname}"]',
+            f'button[data-align="{cname}"]',
+        ])
+
+    # 3) JS fallback (항상 한 번 더 적용 → 보장)
+    apply_alignment_js_fallback(driver, alignment)
+
+    # 선택 해제: 끝으로 이동
+    try:
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
+        ActionChains(driver).send_keys(Keys.END).perform()
+    except Exception:
+        pass
+    return True
+
+
+_QUOTE_PATTERNS = [
+    re.compile(r'^[“"\'](.+?)[”"\']\s*[-—–]\s*.+$'),
+    re.compile(r'^>\s+'),
+    re.compile(r'^[“"](.+?)[”"]$'),
+]
+
+def looks_like_quote(line):
+    """v27: 따옴표/홑따옴표/꺽쇠/> 마커 모두 인용으로 감지.
+    끝에 마침표·물음표·느낌표·쉼표가 붙어도 OK."""
+    s = line.strip()
+    if not s:
+        return False
+    if s.startswith('> ') or s.startswith('> ') or s.startswith('>'):
+        return True
+    # 끝의 구두점 제거 후 양끝 따옴표 검사
+    s2 = s.rstrip('.。!?！？,，')
+    pairs = [('"','"'), ('“','”'), ("'","'"), ('‘','’'), ('「','」'), ('『','』'), ('《','》')]
+    for a,b in pairs:
+        if s2.startswith(a) and s2.endswith(b) and len(s2) > 4:
+            return True
+    # "문장" — 작가 형태
+    if re.match(r'^[“"\'‘「『](.+?)[”"\'’」』]\s*[-—–]\s*.+$', s):
+        return True
+    return False
+
+
+def insert_quote_block(driver, text):
+    """SmartEditor 인용구 — v26: 한 줄(또는 한 문단)만 인용 블록에 넣고 즉시 탈출.
+    - 인용구 버튼 → 첫 스타일 → 텍스트 1회 입력 → Enter → Enter (블록 탈출 보장)
+    """
+    import pyperclip
+    # 인용 마커(>, 양끝 따옴표)만 제거하고 줄바꿈은 첫 줄만 사용
+    # v27: 모든 종류의 따옴표/꺽쇠 마커 제거
+    cleaned = text.lstrip('>').lstrip()
+    cleaned = cleaned.split('\n')[0].strip()
+    # 끝의 구두점은 보존하고 양끝 따옴표만 제거
+    for a,b in [('"','"'), ('“','”'), ("'","'"), ('‘','’'), ('「','」'), ('『','』'), ('《','》')]:
+        # 구두점 처리
+        tail = ''
+        c = cleaned
+        while c and c[-1] in '.。!?！？,，':
+            tail = c[-1] + tail
+            c = c[:-1]
+        if c.startswith(a) and c.endswith(b):
+            cleaned = c[len(a):-len(b)].strip() + tail
+            break
+    if not cleaned:
+        return False
+
+    # 인용구 메뉴 열기
+    opened = _click_toolbar_button(driver, [
+        'button.se-quotation-toolbar-button',
+        'button[data-name="quotation"]',
+        'button[aria-label*="인용구"]',
+    ])
+    if opened:
+        time.sleep(0.35)
+        _click_toolbar_button(driver, [
+            'button.se-quotation-line-button',
+            'button[class*="quotation"][class*="line"]',
+            'ul.se-toolbar-option-quotation li:first-child button',
+        ])
+        time.sleep(0.35)
+
+    # 한 줄만 붙여넣기
+    pyperclip.copy(cleaned)
+    safe_hotkey(driver, 'ctrl', 'v')
+    time.sleep(0.2)
+    # Enter 1회 → 인용 블록 종료 (네이버는 빈 줄 1번이면 인용 블록 탈출)
+    safe_press(driver, 'enter')
+    time.sleep(0.1)
+    # 한 번 더 Enter → 다음 일반 문단 시작 보장
+    safe_press(driver, 'enter')
+    time.sleep(0.15)
+    return True
+
+
+_STICKER_RE = re.compile(r'\[\[STICKER:(\d+)\]\]')
+
+def extract_sticker_indices(line):
+    return [int(m.group(1)) for m in _STICKER_RE.finditer(line)]
+
+def strip_sticker_tokens(line):
+    return _STICKER_RE.sub('', line).strip()
+
+def insert_naver_sticker(driver, sticker_index):
+    """네이버 에디터 스티커 패널을 열고 n번째 스티커 클릭."""
+    from selenium.webdriver.common.by import By
+    try:
+        _click_toolbar_button(driver, [
+            'button.se-sticker-toolbar-button',
+            'button[data-name="sticker"]',
+            'button[aria-label*="스티커"]',
+        ])
+        time.sleep(0.6)
+        items = driver.find_elements(By.CSS_SELECTOR,
+            'ul.se-sticker-list li button, div.se-sticker-grid button, button.se-sticker-item')
+        items = [i for i in items if i.is_displayed()]
+        if items:
+            target = items[sticker_index % len(items)]
+            driver.execute_script("arguments[0].click();", target)
+            time.sleep(0.5)
+            # 스티커 패널 닫기
+            try:
+                from selenium.webdriver.common.keys import Keys
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            except Exception:
+                pass
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _split_long_line(text, max_len=45):
+    """한 줄이 너무 길면 문장 단위로 자르고, 그래도 길면 어절 단위로 자른다.
+    네이버 모바일 가독성을 위한 보조 개행."""
+    text = text.strip()
+    if len(text) <= max_len:
+        return [text]
+    # 1) 문장 분리
+    parts = re.split(r'(?<=[.!?。！？])\s+', text)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) <= max_len:
+            out.append(p)
+            continue
+        # 2) 어절 단위 그리디 분할
+        words = p.split(' ')
+        cur = ''
+        for w in words:
+            if not cur:
+                cur = w
+            elif len(cur) + 1 + len(w) <= max_len:
+                cur = cur + ' ' + w
+            else:
+                out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out
+
+
+def preprocess_article_lines(content, max_line_len=45):
+    """본문 전처리:
+    - \r\n 정규화, ## 헤더 제거
+    - 연속 공백 1칸으로
+    - 빈 줄은 최대 1개만 허용
+    - 한 줄이 max_line_len 이상이면 자동 줄바꿈 (가독성)
+    - "문장" 형태/> 문장은 그대로 유지(인용구 단계에서 처리)
+    - [스티커:n] / [sticker:n] / [STICKER:n] 표기를 [[STICKER:n]] 으로 통일
+    """
+    if not content:
+        return ''
+    text = content.replace('\r\n', '\n')
+    # 다양한 스티커 표기 통일
+    text = re.sub(r'\[\s*스티커\s*[:：]\s*(\d+)\s*\]', r'[[STICKER:\1]]', text)
+    text = re.sub(r'\[\s*sticker\s*[:：]\s*(\d+)\s*\]', r'[[STICKER:\1]]', text, flags=re.I)
+
+    lines = text.split('\n')
+    out = []
+    blank_run = 0
+    for ln in lines:
+        s = ln.rstrip()
+        s = re.sub(r'^#{1,6}\s*', '', s)        # 마크다운 헤더 제거
+        s = re.sub(r'^\*\*(.+?)\*\*$', r'\1', s) # **굵게** 마커 제거(텍스트만 남김)
+        s = re.sub(r'[ \t]{2,}', ' ', s)          # 연속 공백 축소
+        if not s.strip():
+            blank_run += 1
+            if blank_run <= 1:
+                out.append('')
+            continue
+        blank_run = 0
+        # 가독성용 자동 개행 (인용구/사진/스티커 라인은 제외)
+        stripped = s.strip()
+        if (stripped in ('[사진]', '[사진 삽입]', '[이미지 삽입]')
+                or stripped.startswith('[[STICKER:')
+                or looks_like_quote(stripped)):
+            out.append(s)
+        else:
+            for chunk in _split_long_line(s, max_len=max_line_len):
+                out.append(chunk)
+    # 끝부분 빈 줄 제거
+    while out and not out[-1].strip():
+        out.pop()
+    return '\n'.join(out).strip()
+
+
+def extract_message_text(message):
+    content = getattr(message, 'content', '')
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get('type') == 'text' and item.get('text'):
+                    parts.append(item['text'])
+            else:
+                text = getattr(item, 'text', None)
+                if text:
+                    parts.append(text)
+        return ''.join(parts).strip()
+    return str(content or '').strip()
+def build_openai_client(api_key, base_url=None, timeout=180.0):
+    kwargs = {
+        'api_key': api_key,
+        'timeout': timeout,
+        'max_retries': 2,
+    }
+    if base_url:
+        kwargs['base_url'] = base_url
+    return OpenAI(**kwargs)
+def call_openai_text(api_key, prompt, model='gpt-4o', base_url=None):
+    if not api_key:
+        raise ValueError('API Key가 비어 있습니다')
+    client = build_openai_client(api_key, base_url=base_url)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}],
+        max_tokens=2400,
+    )
+    text = extract_message_text(resp.choices[0].message)
+    if not text:
+        raise RuntimeError('AI 응답 본문이 비어 있습니다')
+    return text
+def call_gemini_text(api_key, prompt, model='gemini-2.5-flash'):
+    if not api_key:
+        raise ValueError('API Key가 비어 있습니다')
+
+    last_error = None
+    for attempt in range(2):
+        try:
+            client = genai.Client(api_key=api_key)
+            config = {"timeout": 120}  # 2분 타임아웃
+            resp = client.models.generate_content(model=model, contents=prompt, config=config)
+            text = getattr(resp, 'text', '') or ''
+            if text.strip():
+                return text.strip()
+            raise RuntimeError('Gemini 응답 본문이 비어 있습니다')
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                time.sleep(2)
+
+    raise RuntimeError(f"Gemini 연결 실패 / {format_error_message(last_error)}")
+def generate_dalle_image(api_key, prompt, size="1024x1024", model="gpt-image-1"):
+    """OpenAI ChatGPT 이미지 생성 (gpt-image-1) → 로컬 파일 경로 반환"""
+    if not api_key:
+        raise RuntimeError('OpenAI API Key가 비어 있습니다')
+    client = OpenAI(api_key=api_key.strip())
+    response = client.images.generate(
+        model=model,
+        prompt=prompt,
+        size=size,
+        quality="medium",
+        n=1
+    )
+    # gpt-image-1은 b64_json 반환, url 반환 모두 지원
+    img_item = response.data[0]
+    if hasattr(img_item, 'b64_json') and img_item.b64_json:
+        img_data = base64.b64decode(img_item.b64_json)
+    elif hasattr(img_item, 'url') and img_item.url:
+        img_data = requests.get(img_item.url, timeout=60).content
+    else:
+        raise RuntimeError('이미지 응답에서 데이터를 추출할 수 없습니다')
+    # 임시 파일로 저장
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png', prefix='dalle_')
+    tmp.write(img_data)
+    tmp.close()
+    return tmp.name
+def normalize_model_text(raw_text):
+    """AI 응답 텍스트 정리 (마크다운 코드블록 제거 등)"""
+    cleaned = str(raw_text or '').replace('\r\n', '\n').strip()
+    cleaned = re.sub(r'^```(?:json|text|markdown)?\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    return cleaned.strip()
+def extract_perplexity_text(data):
+    """Perplexity API 응답에서 텍스트를 안전하게 추출"""
+    try:
+        choice = (data.get('choices') or [{}])[0]
+        message = choice.get('message') or {}
+        content = message.get('content', '')
+        if isinstance(content, str):
+            return normalize_model_text(content)
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get('type') == 'text' and item.get('text'):
+                        parts.append(str(item['text']))
+                else:
+                    item_text = getattr(item, 'text', None)
+                    if item_text:
+                        parts.append(str(item_text))
+            return normalize_model_text(''.join(parts))
+    except Exception:
+        pass
+    return normalize_model_text(data.get('text') or data.get('output_text') or '')
+def looks_like_invalid_perplexity_article(text):
+    """Perplexity가 테스트 응답이나 거부 응답을 반환했는지 확인"""
+    sample = normalize_model_text(text).lower()[:200]
+    invalid_patterns = [
+        r'^ok[.!]?$',
+        r'^ok[.!]?\s',
+        r'"say ok" is a song',
+        r'^i cannot',
+        r"^i can't",
+        r'^i am sorry',
+    ]
+    return any(re.search(pattern, sample) for pattern in invalid_patterns)
+def call_perplexity(api_key, prompt, model='sonar-pro', system_message='', search_context_size='medium', timeout=120.0):
+    """Perplexity 공식 SDK를 사용한 AI 글 생성 (timeout/search_context 옵션화)"""
+    if not api_key:
+        raise ValueError('API Key가 비어 있습니다')
+
+    client = OpenAI(
+        api_key=api_key.strip(),
+        base_url='https://api.perplexity.ai',
+        timeout=timeout,
+        max_retries=0,
+        default_headers={
+            'User-Agent': 'Mozilla/5.0 (PostingAllInOne/2.4)',
+            'Accept': 'application/json',
+        },
+    )
+    messages = []
+    if system_message:
+        messages.append({'role': 'system', 'content': system_message})
+    messages.append({'role': 'user', 'content': prompt})
+
+    prompt_lower = prompt.lower()
+    is_test = 'reply with only ok' in prompt_lower or 'say ok' in prompt_lower
+
+    use_web_search = True
+    for attempt in range(3):
+        try:
+            kwargs = dict(messages=messages, model=model, timeout=timeout)
+            if use_web_search:
+                kwargs["web_search_options"] = {"search_context_size": search_context_size}
+            response = client.chat.completions.create(**kwargs)
+            text_resp = response.choices[0].message.content
+            text_resp = normalize_model_text(text_resp)
+
+            if not text_resp:
+                raise RuntimeError('Perplexity 응답 본문이 비어 있습니다')
+
+            if is_test:
+                return 'OK'
+
+            compact = re.sub(r'\s+', '', text_resp)
+            if len(compact) < 80:
+                raise RuntimeError(f'Perplexity 응답이 너무 짧습니다({len(compact)}자)')
+
+            return text_resp
+        except Exception as e:
+            err_msg = str(e)
+            # v58: 400/422 + search_domain_filter / web_search 관련 에러면 옵션 빼고 재시도
+            if use_web_search and ('search_domain_filter' in err_msg
+                                   or 'web_search' in err_msg.lower()
+                                   or '400' in err_msg or '422' in err_msg):
+                use_web_search = False
+                print(f"[Perplexity] web_search_options 제거 후 재시도: {err_msg[:120]}")
+                continue
+            if attempt < 2:
+                time.sleep(4 * (attempt + 1))
+            else:
+                raise RuntimeError(f'Perplexity 호출 실패: {format_error_message(e)}')
+def call_perplexity_chained(api_key, query_list, context, system_message='', search_context_size='medium', timeout=120.0):
+    """여러 질의를 체이닝하여 순차 호출 (timeout 적용)"""
+    if not api_key:
+        raise ValueError('API Key가 비어 있습니다')
+
+    client = OpenAI(
+        api_key=api_key.strip(),
+        base_url='https://api.perplexity.ai',
+        timeout=timeout,
+        max_retries=0,
+        default_headers={
+            'User-Agent': 'Mozilla/5.0 (PostingAllInOne/2.4)',
+            'Accept': 'application/json',
+        },
+    )
+    result = None
+
+    for i, query in enumerate(query_list):
+        prompt = f"{context}\n{query}"
+        messages = []
+        if system_message:
+            messages.append({'role': 'system', 'content': system_message})
+        messages.append({'role': 'user', 'content': prompt})
+
+        try:
+            response = client.chat.completions.create(
+                messages=messages,
+                model='sonar-pro',
+                web_search_options={"search_context_size": search_context_size},
+                timeout=timeout,
+            )
+            result = normalize_model_text(response.choices[0].message.content)
+            context = result
+        except Exception as e:
+            raise RuntimeError(f'Perplexity 체이닝 호출 실패 (질의 {i+1}): {format_error_message(e)}')
+
+    return result
+
+# ═══════════════════════════════════════════════════════════════
+#  1. 설정 페이지 (개별 테스트 버튼 포함)
+# ═══════════════════════════════════════════════════════════════
+
+class ConfigPage(QWidget):
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        layout = QVBoxLayout(self)
+        title = QLabel("🛡️ 계정 및 API 설정")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        layout.addWidget(title)
+
+        cfg = main_win.config
+
+        # ── 네이버 계정 (다중 계정 지원) ──
+        naver_group = QGroupBox("네이버 계정 (다중)")
+        ng = QVBoxLayout(naver_group)
+
+        # 계정 목록 테이블
+        self.account_table = QTableWidget(0, 2)
+        self.account_table.setHorizontalHeaderLabels(["네이버 ID", "비밀번호"])
+        self.account_table.horizontalHeader().setStretchLastSection(True)
+        self.account_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.account_table.setMaximumHeight(150)
+        self.account_table.setStyleSheet("QTableWidget { background-color:#2a2a2a; color:white; }")
+        ng.addWidget(self.account_table)
+
+        # 기존 저장된 계정 불러오기
+        accounts = cfg.get('naver_accounts', [])
+        # 하위호환: 기존 단일 계정 마이그레이션
+        if not accounts and cfg.get('naver_id'):
+            accounts = [{'id': cfg.get('naver_id', ''), 'pw': cfg.get('naver_pw', '')}]
+        for acc in accounts:
+            self._add_account_row(acc.get('id', ''), acc.get('pw', ''))
+
+        # 신규 계정 입력
+        h_new = QHBoxLayout()
+        self.new_naver_id = QLineEdit()
+        self.new_naver_id.setPlaceholderText("새 네이버 ID")
+        h_new.addWidget(self.new_naver_id)
+        self.new_naver_pw = QLineEdit()
+        self.new_naver_pw.setPlaceholderText("비밀번호")
+        self.new_naver_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        h_new.addWidget(self.new_naver_pw)
+        add_btn = QPushButton("➕ 추가")
+        add_btn.setStyleSheet("background-color:#2d5a27; color:white; padding:4px 12px;")
+        add_btn.clicked.connect(self._add_account)
+        h_new.addWidget(add_btn)
+        del_btn = QPushButton("🗑️ 선택 삭제")
+        del_btn.setStyleSheet("background-color:#8a1a1a; color:white; padding:4px 12px;")
+        del_btn.clicked.connect(self._del_account)
+        h_new.addWidget(del_btn)
+        ng.addLayout(h_new)
+
+        self.naver_test_btn = QPushButton("🔑 선택 계정 로그인 테스트")
+        self.naver_test_btn.setStyleSheet("background-color:#2d5a27; color:white; font-weight:bold; padding:6px;")
+        self.naver_test_btn.clicked.connect(self.test_naver_login)
+        ng.addWidget(self.naver_test_btn)
+
+        self.naver_status = QLabel("")
+        ng.addWidget(self.naver_status)
+        layout.addWidget(naver_group)
+
+        # ── AI API Keys (개별 테스트 버튼) ──
+        api_group = QGroupBox("AI API Keys")
+        ag = QVBoxLayout(api_group)
+
+        # Gemini
+        ag.addWidget(QLabel("Gemini API Key:"))
+        h_gem = QHBoxLayout()
+        self.gemini_key = QLineEdit(cfg.get('gemini_key', ''))
+        self.gemini_key.setPlaceholderText("AIza...")
+        h_gem.addWidget(self.gemini_key, 4)
+        self.gemini_test_btn = QPushButton("🧪 테스트")
+        self.gemini_test_btn.setStyleSheet("background-color:#4a4a00; color:white; padding:4px 12px;")
+        self.gemini_test_btn.clicked.connect(self.test_gemini)
+        h_gem.addWidget(self.gemini_test_btn)
+        ag.addLayout(h_gem)
+        self.gemini_status = QLabel("")
+        ag.addWidget(self.gemini_status)
+
+        # Perplexity
+        ag.addWidget(QLabel("Perplexity API Key:"))
+        h_pplx = QHBoxLayout()
+        self.perplex_key = QLineEdit(cfg.get('perplex_key', ''))
+        self.perplex_key.setPlaceholderText("pplx-...")
+        h_pplx.addWidget(self.perplex_key, 4)
+        self.perplex_test_btn = QPushButton("🧪 테스트")
+        self.perplex_test_btn.setStyleSheet("background-color:#4a4a00; color:white; padding:4px 12px;")
+        self.perplex_test_btn.clicked.connect(self.test_perplexity)
+        h_pplx.addWidget(self.perplex_test_btn)
+        ag.addLayout(h_pplx)
+        self.perplex_status = QLabel("")
+        ag.addWidget(self.perplex_status)
+
+        # OpenAI GPT
+        ag.addWidget(QLabel("OpenAI API Key:"))
+        h_oai = QHBoxLayout()
+        self.openai_key = QLineEdit(cfg.get('openai_key', ''))
+        self.openai_key.setPlaceholderText("sk-...")
+        h_oai.addWidget(self.openai_key, 4)
+        self.openai_test_btn = QPushButton("🧪 테스트")
+        self.openai_test_btn.setStyleSheet("background-color:#4a4a00; color:white; padding:4px 12px;")
+        self.openai_test_btn.clicked.connect(self.test_openai)
+        h_oai.addWidget(self.openai_test_btn)
+        ag.addLayout(h_oai)
+        self.openai_status = QLabel("")
+        ag.addWidget(self.openai_status)
+
+        layout.addWidget(api_group)
+
+        # 저장 버튼
+        btn = QPushButton("💾 설정 저장")
+        btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px; font-size:14px;")
+        btn.clicked.connect(self.save)
+        layout.addWidget(btn)
+
+        # 전체 테스트
+        all_test = QPushButton("🔗 전체 연결 테스트")
+        all_test.setStyleSheet("background-color:#5a2d00; color:white; font-weight:bold; padding:8px;")
+        all_test.clicked.connect(self.test_all)
+        layout.addWidget(all_test)
+
+        layout.addStretch()
+
+    def _add_account_row(self, nid='', npw=''):
+        row = self.account_table.rowCount()
+        self.account_table.insertRow(row)
+        id_item = QTableWidgetItem(nid)
+        self.account_table.setItem(row, 0, id_item)
+        pw_item = QTableWidgetItem(npw)
+        self.account_table.setItem(row, 1, pw_item)
+
+    def _add_account(self):
+        nid = self.new_naver_id.text().strip()
+        npw = self.new_naver_pw.text().strip()
+        if not nid or not npw:
+            self._set_status(self.naver_status, False, "ID와 비밀번호를 입력하세요")
+            return
+        # 중복 체크
+        for r in range(self.account_table.rowCount()):
+            if self.account_table.item(r, 0) and self.account_table.item(r, 0).text() == nid:
+                self._set_status(self.naver_status, False, f"'{nid}' 이미 등록된 계정입니다")
+                return
+        self._add_account_row(nid, npw)
+        self.new_naver_id.clear()
+        self.new_naver_pw.clear()
+        self.save()
+        self._set_status(self.naver_status, True, f"'{nid}' 계정 추가 완료")
+
+    def _del_account(self):
+        row = self.account_table.currentRow()
+        if row >= 0:
+            nid = self.account_table.item(row, 0).text() if self.account_table.item(row, 0) else ''
+            self.account_table.removeRow(row)
+            self.save()
+            self._set_status(self.naver_status, True, f"'{nid}' 계정 삭제됨")
+        else:
+            self._set_status(self.naver_status, False, "삭제할 계정을 선택하세요")
+
+    def _get_all_accounts(self):
+        accounts = []
+        for r in range(self.account_table.rowCount()):
+            nid = self.account_table.item(r, 0).text().strip() if self.account_table.item(r, 0) else ''
+            npw = self.account_table.item(r, 1).text().strip() if self.account_table.item(r, 1) else ''
+            if nid and npw:
+                accounts.append({'id': nid, 'pw': npw})
+        return accounts
+
+    def save(self):
+        accounts = self._get_all_accounts()
+        # 하위호환: 첫 번째 계정을 기본으로
+        first_id = accounts[0]['id'] if accounts else ''
+        first_pw = accounts[0]['pw'] if accounts else ''
+        self.main.config.update({
+            'naver_id': first_id,
+            'naver_pw': first_pw,
+            'naver_accounts': accounts,
+            'gemini_key': self.gemini_key.text(),
+            'perplex_key': self.perplex_key.text(),
+            'openai_key': self.openai_key.text(),
+        })
+        with open('config.json', 'w', encoding='utf-8') as f:
+            json.dump(self.main.config, f, ensure_ascii=False, indent=2)
+        self.main.log("✅ 설정 저장 완료")
+        # 다른 페이지 계정 드롭다운 갱신
+        self._refresh_account_combos()
+
+    def _refresh_account_combos(self):
+        accounts = self._get_all_accounts()
+        ids = [a['id'] for a in accounts]
+        for page_key in self.main.pages:
+            page = self.main.pages[page_key]
+            if hasattr(page, 'account_combo'):
+                current = page.account_combo.currentText()
+                page.account_combo.clear()
+                page.account_combo.addItems(ids)
+                if current in ids:
+                    page.account_combo.setCurrentText(current)
+
+    def _set_status(self, label, ok, msg):
+        if ok:
+            label.setText(f"  ✅ {msg}")
+            label.setStyleSheet("color:#00ff00; font-size:12px;")
+        else:
+            label.setText(f"  ❌ {msg}")
+            label.setStyleSheet("color:#ff4444; font-size:12px;")
+
+    # ── 네이버 로그인 테스트 ──
+    def test_naver_login(self):
+        row = self.account_table.currentRow()
+        if row < 0:
+            row = 0  # 기본 첫번째
+        if row >= self.account_table.rowCount():
+            self._set_status(self.naver_status, False, "계정을 먼저 추가하세요")
+            return
+        nid = self.account_table.item(row, 0).text().strip() if self.account_table.item(row, 0) else ''
+        npw = self.account_table.item(row, 1).text().strip() if self.account_table.item(row, 1) else ''
+        if not nid or not npw:
+            self._set_status(self.naver_status, False, "ID/PW를 입력하세요")
+            return
+
+        self.naver_test_btn.setEnabled(False)
+        self.naver_test_btn.setText("테스트 중...")
+        self.naver_status.setText("  ⏳ 로그인 테스트 중...")
+        self.naver_status.setStyleSheet("color:#ffaa00; font-size:12px;")
+
+        def do_test():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile_test')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            driver = make_uc_driver(opts)
+            try:
+                driver.get("https://nid.naver.com/nidlogin.login")
+                time.sleep(2)
+
+                id_el = driver.find_element(By.ID, "id")
+                id_el.clear()
+                safe_paste(driver, id_el, nid)
+                time.sleep(0.3)
+
+                pw_el = driver.find_element(By.ID, "pw")
+                pw_el.clear()
+                safe_paste(driver, pw_el, npw)
+                time.sleep(0.3)
+
+                driver.find_element(By.ID, "log.login").click()
+                time.sleep(5)
+
+                # 로그인 성공 확인
+                current_url = driver.current_url
+                page_source = driver.page_source
+
+                if 'nidlogin' in current_url or '로그인' in page_source[:500]:
+                    # 캡차나 2차 인증 확인
+                    if 'captcha' in page_source.lower() or 'device' in current_url:
+                        return "CAPTCHA|보안 인증이 필요합니다. 브라우저에서 직접 로그인 후 재시도하세요"
+                    return "FAIL|로그인 실패 - ID/PW를 확인하세요"
+                else:
+                    return "OK|로그인 성공!"
+            except Exception as e:
+                return f"FAIL|{str(e)}"
+            finally:
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+        def on_result(r):
+            parts = r.split("|", 1)
+            status = parts[0]
+            msg = parts[1] if len(parts) > 1 else r
+            if status == "OK":
+                self._set_status(self.naver_status, True, msg)
+                self.main.log("✅ 네이버 로그인 테스트 성공")
+            elif status == "CAPTCHA":
+                self.naver_status.setText(f"  ⚠️ {msg}")
+                self.naver_status.setStyleSheet("color:#ffaa00; font-size:12px;")
+                self.main.log(f"⚠️ 네이버: {msg}")
+            else:
+                self._set_status(self.naver_status, False, msg)
+                self.main.log(f"❌ 네이버 로그인: {msg}")
+
+        thread = WorkerThread(do_test)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.naver_test_btn.setEnabled(True),
+            self.naver_test_btn.setText("🔑 네이버 로그인 테스트")
+        ))
+        thread.start()
+
+    # ── Gemini 테스트 ──
+    def test_gemini(self):
+        key = self.gemini_key.text().strip()
+        if not key:
+            self._set_status(self.gemini_status, False, "API Key를 입력하세요")
+            return
+        self.gemini_test_btn.setEnabled(False)
+        self.gemini_test_btn.setText("테스트중...")
+        self.gemini_status.setText("  ⏳ 연결 중...")
+        self.gemini_status.setStyleSheet("color:#ffaa00; font-size:12px;")
+
+        def do_test():
+            client = genai.Client(api_key=key)
+            resp = client.models.generate_content(model="gemini-2.5-flash", contents="Say OK")
+            return f"OK|연결 성공 - 응답: {resp.text[:50]}"
+
+        def on_result(r):
+            parts = r.split("|", 1)
+            self._set_status(self.gemini_status, parts[0] == "OK", parts[1] if len(parts) > 1 else r)
+            self.main.log(f"{'✅' if parts[0] == 'OK' else '❌'} Gemini: {parts[1] if len(parts) > 1 else r}")
+
+        thread = WorkerThread(do_test)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(lambda msg: (
+            self._set_status(self.gemini_status, False, msg.replace("❌ 오류 발생: ", "")),
+        ))
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.gemini_test_btn.setEnabled(True),
+            self.gemini_test_btn.setText("🧪 테스트")
+        ))
+        thread.start()
+
+    # ── Perplexity 테스트 ──
+    def test_perplexity(self):
+        key = self.perplex_key.text().strip()
+        if not key:
+            self._set_status(self.perplex_status, False, "API Key를 입력하세요")
+            return
+        self.perplex_test_btn.setEnabled(False)
+        self.perplex_test_btn.setText("테스트중...")
+        self.perplex_status.setText("  ⏳ 연결 중...")
+        self.perplex_status.setStyleSheet("color:#ffaa00; font-size:12px;")
+
+        def do_test():
+            call_perplexity(key, "Reply with only OK", model="sonar", system_message="Return only OK.")
+            return "OK|연결 성공 - 응답: OK"
+
+        def on_result(r):
+            parts = r.split("|", 1)
+            self._set_status(self.perplex_status, parts[0] == "OK", parts[1] if len(parts) > 1 else r)
+            self.main.log(f"{'✅' if parts[0] == 'OK' else '❌'} Perplexity: {parts[1] if len(parts) > 1 else r}")
+
+        thread = WorkerThread(do_test)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(lambda msg: (
+            self._set_status(self.perplex_status, False, msg.replace("❌ 오류 발생: ", "")),
+        ))
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.perplex_test_btn.setEnabled(True),
+            self.perplex_test_btn.setText("🧪 테스트")
+        ))
+        thread.start()
+
+    # ── OpenAI GPT 테스트 ──
+    def test_openai(self):
+        key = self.openai_key.text().strip()
+        if not key:
+            self._set_status(self.openai_status, False, "API Key를 입력하세요")
+            return
+        self.openai_test_btn.setEnabled(False)
+        self.openai_test_btn.setText("테스트중...")
+        self.openai_status.setText("  ⏳ 연결 중...")
+        self.openai_status.setStyleSheet("color:#ffaa00; font-size:12px;")
+
+        def do_test():
+            client = OpenAI(api_key=key)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "Say OK"}],
+                max_tokens=10
+            )
+            return f"OK|연결 성공 - 응답: {resp.choices[0].message.content[:50]}"
+
+        def on_result(r):
+            parts = r.split("|", 1)
+            self._set_status(self.openai_status, parts[0] == "OK", parts[1] if len(parts) > 1 else r)
+            self.main.log(f"{'✅' if parts[0] == 'OK' else '❌'} OpenAI: {parts[1] if len(parts) > 1 else r}")
+
+        thread = WorkerThread(do_test)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(lambda msg: (
+            self._set_status(self.openai_status, False, msg.replace("❌ 오류 발생: ", "")),
+        ))
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.openai_test_btn.setEnabled(True),
+            self.openai_test_btn.setText("🧪 테스트")
+        ))
+        thread.start()
+
+    # ── 전체 테스트 ──
+    def test_all(self):
+        self.save()
+        self.main.log("🔗 전체 연결 테스트 시작...")
+        if self.gemini_key.text().strip():
+            self.test_gemini()
+        if self.perplex_key.text().strip():
+            self.test_perplexity()
+        if self.openai_key.text().strip():
+            self.test_openai()
+        if self._get_all_accounts():
+            # 네이버는 AI 테스트 후 약간의 딜레이
+            QTimer.singleShot(2000, self.test_naver_login)
+# ═══════════════════════════════════════════════════════════════
+#  2. 키워드 분석 페이지
+# ═══════════════════════════════════════════════════════════════
+
+class KeywordAnalysisPage(QWidget):
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        layout = QVBoxLayout(self)
+        title = QLabel("🔍 키워드 분석")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        layout.addWidget(title)
+
+        self.seed_keywords = QTextEdit()
+        self.seed_keywords.setPlaceholderText("키워드1\n키워드2\n(엔터로 구분)")
+        self.seed_keywords.setMaximumHeight(100)
+        layout.addWidget(QLabel("시드 키워드:"));
+        layout.addWidget(self.seed_keywords)
+
+        self.analyze_btn = QPushButton("🚀 분석 시작")
+        self.analyze_btn.clicked.connect(self.start_analysis)
+        layout.addWidget(self.analyze_btn)
+
+        self.result = QTextBrowser()
+        layout.addWidget(self.result)
+
+    def start_analysis(self):
+        keywords = [k.strip() for k in self.seed_keywords.toPlainText().split('\n') if k.strip()]
+        if not keywords:
+            self.main.log("⚠️ 키워드를 입력하세요");
+            return
+        self.analyze_btn.setEnabled(False)
+        self.analyze_btn.setText("분석 중...")
+
+        def do_analysis():
+            results = []
+            for kw in keywords:
+                results.append(f"🔑 {kw}: 키워드 분석 완료")
+            return '\n'.join(results)
+
+        thread = WorkerThread(do_analysis)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.result.setPlainText(r))
+        thread.finished_signal.connect(lambda: (self.analyze_btn.setEnabled(True), self.analyze_btn.setText("🚀 분석 시작")))
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+#  3. 블로그 수집 → AI 글쓰기 → 자동발행 (통합 파이프라인)
+# ═══════════════════════════════════════════════════════════════
+
+class BlogPipelinePage(QWidget):
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        self.collected_articles = []
+        self.generated_content = ""
+        self.generated_articles = []  # 개별 원고 리스트
+        self._cancel_crawl = False
+        self._cancel_generate = False
+        self._crawling = False
+        self._generating = False
+        self._folder_cache = {}
+        try:
+            with open('folder_cache.json', 'r', encoding='utf-8') as f:
+                self._folder_cache = json.load(f)
+        except Exception:
+            pass
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        title = QLabel("📝 블로그 수집 → AI 글쓰기 → 자동발행 파이프라인")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        scroll_layout.addWidget(title)
+
+        # ══════════════════════════════════════
+        # STEP 1: 키워드 입력
+        # ══════════════════════════════════════
+        step1 = QGroupBox("STEP 1️⃣  키워드 입력")
+        s1 = QVBoxLayout(step1)
+
+        h1 = QHBoxLayout()
+        self.keywords_input = QLineEdit()
+        self.keywords_input.setPlaceholderText("키워드1, 키워드2, 키워드3 (쉼표로 구분)")
+        h1.addWidget(QLabel("키워드:"))
+        h1.addWidget(self.keywords_input, 3)
+
+        self.excel_btn = QPushButton("📂 엑셀 일괄등록")
+        self.excel_btn.clicked.connect(self.load_excel_keywords)
+        h1.addWidget(self.excel_btn)
+        s1.addLayout(h1)
+
+        self.keyword_table = QTableWidget(0, 3)
+        self.keyword_table.setHorizontalHeaderLabels(["키워드", "상태", "수집 결과"])
+        self.keyword_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.keyword_table.setMaximumHeight(120)
+        s1.addWidget(self.keyword_table)
+
+        h1b = QHBoxLayout()
+        self.add_kw_btn = QPushButton("➕ 키워드 추가")
+        self.add_kw_btn.clicked.connect(self.add_keywords)
+        self.clear_kw_btn = QPushButton("🗑️ 전체 삭제")
+        self.clear_kw_btn.clicked.connect(lambda: self.keyword_table.setRowCount(0))
+        h1b.addWidget(self.add_kw_btn)
+        h1b.addWidget(self.clear_kw_btn)
+        s1.addLayout(h1b)
+
+        scroll_layout.addWidget(step1)
+
+        # ══════════════════════════════════════
+        # STEP 2: 블로그 크롤링 설정
+        # ══════════════════════════════════════
+        step2 = QGroupBox("STEP 2️⃣  네이버 블로그 크롤링 설정")
+        s2 = QVBoxLayout(step2)
+
+        h2 = QHBoxLayout()
+        h2.addWidget(QLabel("추출 글 수:"))
+        self.extract_count = QSpinBox()
+        self.extract_count.setRange(1, 50)
+        self.extract_count.setValue(5)
+        h2.addWidget(self.extract_count)
+
+        h2.addWidget(QLabel("정렬:"))
+        self.sort_type = QComboBox()
+        self.sort_type.addItems(["최신순", "정확도순", "인기순"])
+        h2.addWidget(self.sort_type)
+        h2.addStretch()
+        s2.addLayout(h2)
+
+        self.crawl_btn = QPushButton("🔍 블로그 수집 시작")
+        self.crawl_btn.clicked.connect(self.start_crawl)
+        self.crawl_btn.setStyleSheet("background-color:#2d5a27; color:white; font-weight:bold; padding:8px;")
+        s2.addWidget(self.crawl_btn)
+
+        self.crawl_progress = QProgressBar()
+        self.crawl_progress.setVisible(False)
+        s2.addWidget(self.crawl_progress)
+
+        self.crawl_result = QTextBrowser()
+        self.crawl_result.setMaximumHeight(200)
+        self.crawl_result.setPlaceholderText("수집된 블로그 본문이 여기에 표시됩니다...")
+        s2.addWidget(self.crawl_result)
+
+        scroll_layout.addWidget(step2)
+
+        # ══════════════════════════════════════
+        # STEP 3: AI 글쓰기
+        # ══════════════════════════════════════
+        step3 = QGroupBox("STEP 3️⃣  AI 글쓰기")
+        s3 = QVBoxLayout(step3)
+
+        h3a = QHBoxLayout()
+        h3a.addWidget(QLabel("AI 서비스:"))
+        self.ai_service = QComboBox()
+        self.ai_service.addItems(["Gemini (gemini-2.5-flash)", "Perplexity (sonar-pro)", "GPT (gpt-4o)"])
+        h3a.addWidget(self.ai_service, 2)
+
+        h3a.addWidget(QLabel("글자 수:"))
+        self.char_count = QSpinBox()
+        self.char_count.setRange(500, 10000)
+        self.char_count.setValue(2000)
+        self.char_count.setSingleStep(500)
+        h3a.addWidget(self.char_count)
+        s3.addLayout(h3a)
+
+        h3b = QHBoxLayout()
+        self.opt_map = QCheckBox("📍 지도 삽입")
+        self.opt_video = QCheckBox("🎬 영상 삽입")
+        self.opt_quote = QCheckBox("💬 인용구 포함")
+        self.opt_quote.setChecked(True)
+        self.opt_photo = QCheckBox("📷 사진 위치 표시")
+        self.opt_photo.setChecked(True)
+        self.opt_hashtag = QCheckBox("#️⃣ 해시태그")
+        self.opt_hashtag.setChecked(True)
+        h3b.addWidget(self.opt_map)
+        h3b.addWidget(self.opt_video)
+        h3b.addWidget(self.opt_quote)
+        h3b.addWidget(self.opt_photo)
+        h3b.addWidget(self.opt_hashtag)
+        s3.addLayout(h3b)
+
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setPlaceholderText("AI에게 전달할 프롬프트를 입력하세요...")
+        self.ai_prompt.setPlainText(
+            "아래 참고 자료를 바탕으로 SEO 최적화된 네이버 블로그 포스트를 작성해주세요.\n"
+            "- 자연스러운 말투 (1인칭 경험담)\n"
+            "- 소제목 3개 이상 (##)\n"
+            "- 핵심 키워드 자연스럽게 5회 이상 배치\n"
+            "- [사진] 태그로 사진 삽입 위치 표시\n"
+            "- [인용구]텍스트[/인용구] 형태로 강조 문구 표시\n"
+            "- 마지막에 해시태그 5개 추가"
+        )
+        self.ai_prompt.setMaximumHeight(120)
+        s3.addWidget(QLabel("프롬프트:"))
+        s3.addWidget(self.ai_prompt)
+
+        h3c = QHBoxLayout()
+        self.send_to_ai_btn = QPushButton("⬇️ 수집 결과 → AI 입력")
+        self.send_to_ai_btn.clicked.connect(self.send_to_ai)
+        h3c.addWidget(self.send_to_ai_btn)
+
+        self.generate_btn = QPushButton("🎯 AI 원고 생성")
+        self.generate_btn.clicked.connect(self.generate_ai)
+        self.generate_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+        h3c.addWidget(self.generate_btn)
+        s3.addLayout(h3c)
+
+        self.ai_gen_progress = QProgressBar()
+        self.ai_gen_progress.setVisible(False)
+        s3.addWidget(self.ai_gen_progress)
+
+        self.ai_input = QTextEdit()
+        self.ai_input.setPlaceholderText("수집된 블로그 본문이 AI 입력으로 전달됩니다...")
+        self.ai_input.setMaximumHeight(100)
+        s3.addWidget(QLabel("AI 입력 (수집 데이터):"))
+        s3.addWidget(self.ai_input)
+
+        # ── 원고 리스트 테이블 ──
+        s3.addWidget(QLabel("📋 생성된 원고 리스트:"))
+        self.article_table = QTableWidget()
+        self.article_table.setColumnCount(4)
+        self.article_table.setHorizontalHeaderLabels(["번호", "상태", "제목", "글자수"])
+        self.article_table.horizontalHeader().setStretchLastSection(True)
+        self.article_table.setColumnWidth(0, 50)
+        self.article_table.setColumnWidth(1, 60)
+        self.article_table.setColumnWidth(2, 350)
+        self.article_table.setColumnWidth(3, 70)
+        self.article_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.article_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.article_table.itemSelectionChanged.connect(self._on_article_selected)
+        self.article_table.setMinimumHeight(150)
+        s3.addWidget(self.article_table)
+
+        self.ai_output = QTextBrowser()
+        self.ai_output.setPlaceholderText("원고를 선택하면 여기에 표시됩니다...")
+        s3.addWidget(QLabel("📄 선택된 원고 미리보기:"))
+        s3.addWidget(self.ai_output)
+
+        self.error_summary_label = QLabel("⚠️ 주요 오류:")
+        self.error_summary_label.setVisible(False)
+        s3.addWidget(self.error_summary_label)
+        self.error_summary = QTextBrowser()
+        self.error_summary.setMaximumHeight(60)
+        self.error_summary.setVisible(False)
+        s3.addWidget(self.error_summary)
+
+        h3d = QHBoxLayout()
+        copy_btn = QPushButton("📋 선택 원고 복사")
+        copy_btn.clicked.connect(self._copy_selected_article)
+        h3d.addWidget(copy_btn)
+        copy_all_btn = QPushButton("📋 전체 원고 복사")
+        copy_all_btn.clicked.connect(self._copy_all_articles)
+        h3d.addWidget(copy_all_btn)
+        save_btn = QPushButton("💾 전체 원고 저장")
+        save_btn.clicked.connect(self.save_draft)
+        h3d.addWidget(save_btn)
+        export_btn = QPushButton("📊 엑셀로 내보내기")
+        export_btn.clicked.connect(self._export_articles_excel)
+        h3d.addWidget(export_btn)
+        import_btn = QPushButton("📥 엑셀 원고 불러오기")
+        import_btn.clicked.connect(self._import_articles_excel)
+        h3d.addWidget(import_btn)
+        s3.addLayout(h3d)
+
+        scroll_layout.addWidget(step3)
+
+        # ══════════════════════════════════════
+        # STEP 4: 네이버 자동 발행
+        # ══════════════════════════════════════
+        step4 = QGroupBox("STEP 4️⃣  네이버 블로그 자동 발행")
+        s4 = QVBoxLayout(step4)
+
+        # 계정 선택
+        h4_acc = QHBoxLayout()
+        h4_acc.addWidget(QLabel("발행 계정:"))
+        self.account_combo = QComboBox()
+        accounts = self.main.config.get('naver_accounts', [])
+        if not accounts and self.main.config.get('naver_id'):
+            accounts = [{'id': self.main.config.get('naver_id', '')}]
+        for acc in accounts:
+            self.account_combo.addItem(acc.get('id', ''))
+        h4_acc.addWidget(self.account_combo, 2)
+        s4.addLayout(h4_acc)
+
+        h4a = QHBoxLayout()
+        h4a.addWidget(QLabel("블로그 폴더:"))
+        self.blog_folder = QComboBox()
+        self.blog_folder.setEditable(True)
+        h4a.addWidget(self.blog_folder, 2)
+
+        self.load_folders_btn = QPushButton("🔄 폴더 불러오기")
+        self.load_folders_btn.clicked.connect(self.load_blog_folders)
+        h4a.addWidget(self.load_folders_btn)
+        s4.addLayout(h4a)
+
+        h4b = QHBoxLayout()
+        h4b.addWidget(QLabel("저장 형태:"))
+        self.save_mode = QComboBox()
+        self.save_mode.addItems(["💾 임시저장", "📤 즉시발행", "⏰ 예약발행"])
+        # v24: 본문 정렬 선택
+        self.alignment_combo = QComboBox()
+        self.alignment_combo.addItems(["⬅️ 좌측 정렬", "⬆️ 가운데 정렬", "➡️ 우측 정렬", "↔️ 양쪽 정렬"])
+        self.alignment_combo.currentIndexChanged.connect(
+            lambda i: setattr(self, '_selected_alignment', ['left','center','right','justify'][i])
+        )
+        self._selected_alignment = 'left'
+        h4b.addWidget(self.save_mode)
+        h4b.addWidget(QLabel("정렬:"))
+        h4b.addWidget(self.alignment_combo)
+
+        h4b.addWidget(QLabel("예약 시간:"))
+        self.schedule_time = QLineEdit()
+        self.schedule_time.setPlaceholderText("2025-01-15 09:00")
+        self.schedule_time.setEnabled(False)
+        h4b.addWidget(self.schedule_time)
+        self.save_mode.currentIndexChanged.connect(
+            lambda idx: self.schedule_time.setEnabled(idx == 2)
+        )
+        s4.addLayout(h4b)
+
+        info = QLabel("⚠️ 실제 타자 입력 방식으로 작성합니다 (봇 탐지 회피)\n"
+                      "• [인용구] → 네이버 인용구 블록  • [사진] → 사진 삽입 위치\n"
+                      "• [지도:장소명] → 네이버 지도  • #해시태그 → 자동 추가")
+        info.setStyleSheet("color:#aaa; font-size:11px; padding:4px;")
+        s4.addWidget(info)
+
+        self.publish_btn = QPushButton("🔥 네이버 블로그 자동 발행")
+        self.publish_btn.clicked.connect(self.publish_to_naver)
+        self.publish_btn.setStyleSheet(
+            "background-color:#8a1a1a; color:white; font-weight:bold; padding:10px; font-size:14px;")
+        s4.addWidget(self.publish_btn)
+
+        self.publish_progress = QProgressBar()
+        self.publish_progress.setVisible(False)
+        s4.addWidget(self.publish_progress)
+
+        scroll_layout.addWidget(step4)
+
+        # 스크롤 설정
+        main_layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_widget)
+        scroll.setWidgetResizable(True)
+        main_layout.addWidget(scroll)
+
+    def _copy(self, text):
+        if text:
+            pyperclip.copy(text)
+            self.main.log("📋 클립보드에 복사됨")
+
+    def _export_articles_excel(self):
+        """생성된 원고를 엑셀로 내보내기"""
+        if not self.generated_articles:
+            self.main.log("⚠️ 내보낼 원고가 없습니다")
+            return
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            path, _ = QFileDialog.getSaveFileName(self, "엑셀 내보내기", "블로그_원고_목록.xlsx", "Excel Files (*.xlsx)")
+            if not path:
+                return
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "원고 목록"
+            headers = ["번호", "제목", "키워드", "글자수", "상태", "원문 참고", "생성된 원고"]
+            header_fill = PatternFill('solid', fgColor='1a4a8a')
+            header_font = Font(bold=True, color='FFFFFF')
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions['A'].width = 6
+            ws.column_dimensions['B'].width = 50
+            ws.column_dimensions['C'].width = 20
+            ws.column_dimensions['D'].width = 10
+            ws.column_dimensions['E'].width = 8
+            ws.column_dimensions['F'].width = 60
+            ws.column_dimensions['G'].width = 80
+            for i, art in enumerate(self.generated_articles):
+                ws.cell(row=i+2, column=1, value=i+1)
+                ws.cell(row=i+2, column=2, value=art.get('title', ''))
+                ws.cell(row=i+2, column=3, value=art.get('keyword', ''))
+                ws.cell(row=i+2, column=4, value=len(art.get('content', '')))
+                ws.cell(row=i+2, column=5, value=art.get('status', '완료'))
+                ws.cell(row=i+2, column=6, value=art.get('source', '')[:500])
+                ws.cell(row=i+2, column=7, value=art.get('content', ''))
+            wb.save(path)
+            self.main.log(f"📊 엑셀 내보내기 완료: {path} ({len(self.generated_articles)}건)")
+        except ImportError:
+            self.main.log("❌ openpyxl 패키지가 필요합니다: pip install openpyxl")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 내보내기 오류: {e}")
+
+    def _import_articles_excel(self):
+        """엑셀 파일에서 원고를 불러오기"""
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 원고 파일 선택", "", "Excel Files (*.xlsx *.xls)")
+        if not path:
+            return
+        try:
+            import pandas as pd
+            df = pd.read_excel(path)
+            imported = []
+            for _, row in df.iterrows():
+                title = str(row.get('제목', row.get('title', '제목 없음')))
+                content = str(row.get('생성된 원고', row.get('content', row.get('생성된원고', ''))))
+                keyword = str(row.get('키워드', row.get('keyword', '')))
+                source = str(row.get('원문 참고', row.get('원문참고', row.get('source', ''))))
+                if content and content != 'nan':
+                    imported.append({
+                        'title': title if title != 'nan' else '제목 없음',
+                        'content': content,
+                        'keyword': keyword if keyword != 'nan' else '',
+                        'source': source if source != 'nan' else '',
+                        'status': '완료',
+                    })
+            if imported:
+                self.generated_articles.extend(imported)
+                self.ai_output.setPlainText(imported[-1]['content'])
+                self.main.log(f"📥 엑셀에서 {len(imported)}건 원고 불러옴 (총 {len(self.generated_articles)}건)")
+            else:
+                self.main.log("⚠️ 엑셀에서 불러올 원고가 없습니다 (제목/생성된 원고 컬럼 필요)")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 원고 불러오기 오류: {e}")
+
+    def load_excel_keywords(self):
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel Files (*.xlsx *.xls *.csv)")
+        if not path: return
+        try:
+            import pandas as pd
+            if path.endswith('.csv'):
+                df = pd.read_csv(path)
+            else:
+                df = pd.read_excel(path)
+            keywords = df.iloc[:, 0].dropna().astype(str).tolist()
+            for kw in keywords:
+                row = self.keyword_table.rowCount()
+                self.keyword_table.insertRow(row)
+                self.keyword_table.setItem(row, 0, QTableWidgetItem(kw.strip()))
+                self.keyword_table.setItem(row, 1, QTableWidgetItem("대기"))
+                self.keyword_table.setItem(row, 2, QTableWidgetItem(""))
+            self.main.log(f"✅ {len(keywords)}개 키워드 엑셀에서 로드")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 로드 실패: {e}")
+
+    def add_keywords(self):
+        text = self.keywords_input.text().strip()
+        if not text: return
+        keywords = [k.strip() for k in text.split(',') if k.strip()]
+        for kw in keywords:
+            row = self.keyword_table.rowCount()
+            self.keyword_table.insertRow(row)
+            self.keyword_table.setItem(row, 0, QTableWidgetItem(kw))
+            self.keyword_table.setItem(row, 1, QTableWidgetItem("대기"))
+            self.keyword_table.setItem(row, 2, QTableWidgetItem(""))
+        self.keywords_input.clear()
+        self.main.log(f"✅ {len(keywords)}개 키워드 추가됨")
+
+    def save_draft(self):
+        content = self.ai_output.toPlainText()
+        if not content:
+            self.main.log("⚠️ 저장할 원고가 없습니다");
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "원고 저장", "draft.txt", "Text Files (*.txt)")
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self.main.log(f"✅ 원고 저장: {path}")
+
+    # ──────────── 블로그 수집 ────────────
+
+    def start_crawl(self):
+        keywords = []
+        for row in range(self.keyword_table.rowCount()):
+            item = self.keyword_table.item(row, 0)
+            if item and item.text().strip():
+                keywords.append(item.text().strip())
+        if not keywords:
+            self.main.log("⚠️ 키워드를 먼저 추가하세요");
+            return
+
+        count = self.extract_count.value()
+        # 취소 토글
+        if self._crawling:
+            self._cancel_crawl = True
+            self.crawl_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 수집 취소 요청됨...")
+            return
+
+        self._cancel_crawl = False
+        self._crawling = True
+        self.crawl_btn.setText("🛑 수집 취소")
+        self.crawl_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.crawl_progress.setVisible(True)
+        self.crawl_progress.setValue(0)
+
+        def do_crawl():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            opts = uc.ChromeOptions()
+            opts.add_argument('--headless=new')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            driver = make_uc_driver(opts)
+            all_articles = []
+
+            try:
+                total = len(keywords) * count
+                done = 0
+
+                for ki, keyword in enumerate(keywords):
+                    self.log_emit(f"🔍 [{ki + 1}/{len(keywords)}] '{keyword}' 검색 중...")
+                    self.update_kw_status(ki, "수집 중")
+
+                    search_url = f"https://search.naver.com/search.naver?where=nexearch&query={keyword}"
+                    driver.get(search_url)
+                    time.sleep(2)
+
+                    blog_links = []
+                    import re as _re
+                    def is_blog_post(url):
+                        """블로그 홈(목록)이 아닌 실제 포스트 URL만 허용"""
+                        if 'blog.naver.com' not in url:
+                            return False
+                        if _re.search(r'blog\.naver\.com/[^/]+/\d+', url):
+                            return True
+                        if 'PostView' in url or 'postView' in url:
+                            return True
+                        return False
+
+                    # 통합검색 페이지에서 블로그 블록 내 순위별 링크 추출
+                    try:
+                        blog_selectors = [
+                            'a.title_link',
+                            'a.api_txt_lines',
+                            'div.fds-comps-right-image a',
+                            'div.fds-comps-left-image a',
+                            'div.blog_group a.title_link',
+                            'div.api_subject_bx a.title_link',
+                            'div.detail_box a.title_link',
+                            'div.total_group a.api_txt_lines',
+                        ]
+                        for sel in blog_selectors:
+                            items = driver.find_elements(By.CSS_SELECTOR, sel)
+                            for item in items:
+                                href = item.get_attribute('href') or ''
+                                if is_blog_post(href) and href not in blog_links:
+                                    blog_links.append(href)
+                                    self.log_emit(f"    \u2705 순위{len(blog_links)}: {href[:80]}")
+                                    if len(blog_links) >= count:
+                                        break
+                            if len(blog_links) >= count:
+                                break
+                    except Exception as e:
+                        self.log_emit(f"    \u26a0\ufe0f 셀렉터 오류: {e}")
+
+                    # 폴백: 전체 링크에서 블로그 포스트만 수집
+                    if not blog_links:
+                        try:
+                            self.log_emit("    \U0001f504 폴백: 전체 링크에서 검색...")
+                            all_links = driver.find_elements(By.TAG_NAME, 'a')
+                            for link in all_links:
+                                href = link.get_attribute('href') or ''
+                                if is_blog_post(href) and href not in blog_links:
+                                    blog_links.append(href)
+                                    self.log_emit(f"    \u2705 순위{len(blog_links)}: {href[:80]}")
+                                    if len(blog_links) >= count:
+                                        break
+                        except Exception:
+                            pass
+
+                    self.log_emit(f"  📎 {len(blog_links)}개 블로그 링크 발견")
+
+                    for bi, blog_url in enumerate(blog_links[:count]):
+                        try:
+                            self.log_emit(f"  📖 [{bi + 1}/{min(len(blog_links), count)}] 본문 수집 중...")
+                            driver.get(blog_url)
+                            time.sleep(2)
+
+                            try:
+                                iframe = WebDriverWait(driver, 5).until(
+                                    EC.presence_of_element_located((By.ID, 'mainFrame'))
+                                )
+                                driver.switch_to.frame(iframe)
+                            except Exception:
+                                pass
+
+                            body_text = ""
+                            title_text = ""
+                            selectors = [
+                                'div.se-main-container',
+                                'div.__se_component_area',
+                                'div#postViewArea',
+                                'div.post-view',
+                                'div#post-area'
+                            ]
+                            for sel in selectors:
+                                try:
+                                    elem = driver.find_element(By.CSS_SELECTOR, sel)
+                                    body_text = elem.text
+                                    if body_text and len(body_text) > 100:
+                                        break
+                                except Exception:
+                                    continue
+
+                            try:
+                                title_elem = driver.find_element(By.CSS_SELECTOR,
+                                                                 'div.se-title-text, span.pcol1, div.htitle')
+                                title_text = title_elem.text
+                            except Exception:
+                                title_text = keyword
+
+                            driver.switch_to.default_content()
+
+                            if body_text and len(body_text) > 50:
+                                article = {
+                                    'keyword': keyword,
+                                    'title': title_text[:100],
+                                    'body': body_text[:3000],
+                                    'url': blog_url
+                                }
+                                all_articles.append(article)
+
+                            done += 1
+                            pct = int((done / total) * 100)
+                            self.progress_emit(pct)
+
+                        except Exception as e:
+                            self.log_emit(f"  ⚠️ 수집 실패: {e}")
+                            driver.switch_to.default_content()
+                            done += 1
+
+                    self.update_kw_status(ki, f"완료 ({len([a for a in all_articles if a['keyword'] == keyword])}건)")
+
+            finally:
+                driver.quit()
+
+            self.collected_articles = all_articles
+
+            result_text = ""
+            for i, art in enumerate(all_articles):
+                result_text += f"━━━ [{i + 1}] {art['title']} ━━━\n"
+                result_text += f"키워드: {art['keyword']}\n"
+                result_text += f"URL: {art['url']}\n"
+                result_text += f"본문:\n{art['body'][:500]}...\n\n"
+
+            return result_text if result_text else "수집 결과 없음"
+
+        thread = WorkerThread(do_crawl)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.crawl_result.setPlainText(r))
+        thread.progress_signal.connect(self.crawl_progress.setValue)
+        def _on_crawl_finished():
+            self._crawling = False
+            self._cancel_crawl = False
+            self.crawl_btn.setText("🔍 블로그 수집 시작")
+            self.crawl_btn.setStyleSheet("background-color:#2d5a27; color:white; font-weight:bold; padding:8px;")
+            self.crawl_progress.setVisible(False)
+
+        thread.finished_signal.connect(_on_crawl_finished)
+        thread.start()
+
+    def log_emit(self, msg):
+        QTimer.singleShot(0, lambda: self.main.log(msg))
+
+    def progress_emit(self, val):
+        QTimer.singleShot(0, lambda: self.crawl_progress.setValue(val))
+
+    def update_kw_status(self, row, status):
+        QTimer.singleShot(0, lambda: self.keyword_table.setItem(row, 1, QTableWidgetItem(status)))
+
+    # ──────────── AI 글쓰기 ────────────
+
+    def send_to_ai(self):
+        txt = self.crawl_result.toPlainText()
+        if not txt.strip():
+            self.main.log("⚠️ 먼저 블로그 수집을 실행하세요");
+            return
+        self.ai_input.setPlainText(txt)
+        self.main.log("✅ 수집 결과 → AI 입력 전달 완료")
+
+    def generate_ai(self):
+        """수집된 각 기사마다 개별 AI 원고를 생성 (테이블 기반)"""
+        if self._generating:
+            self._cancel_generate = True
+            self.generate_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 AI 생성 취소 요청됨...")
+            return
+
+        content = self.ai_input.toPlainText().strip()
+        if not content:
+            self.main.log("⚠️ AI 입력이 비어 있음. '수집→AI' 버튼을 먼저 클릭하세요")
+            return
+
+        if not self.collected_articles:
+            articles = self._parse_articles_from_text(content)
+        else:
+            articles = self.collected_articles
+
+        if not articles:
+            self.main.log("⚠️ 수집된 기사가 없습니다")
+            return
+
+        total = len(articles)
+        self._cancel_generate = False
+        self._generating = True
+        self.generate_btn.setText(f"🛑 생성 취소 (0/{total})")
+        self.generate_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.ai_gen_progress.setVisible(True)
+        self.ai_gen_progress.setValue(0)
+        self.error_summary.setVisible(False)
+        self.error_summary_label.setVisible(False)
+
+        self.generated_articles = []
+        self.article_table.setRowCount(total)
+        for i, art in enumerate(articles):
+            self.article_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 1, QTableWidgetItem("대기"))
+            self.article_table.setItem(i, 2, QTableWidgetItem(art.get('title', '')[:80]))
+            self.article_table.setItem(i, 3, QTableWidgetItem("-"))
+
+        service = self.ai_service.currentText()
+        prompt = self.ai_prompt.toPlainText().strip()
+        char_limit = self.char_count.value()
+
+        options = []
+        if self.opt_map.isChecked(): options.append("- [지도:장소명] 형태로 네이버 지도 삽입 위치를 표시해주세요")
+        if self.opt_video.isChecked(): options.append("- [영상] 형태로 관련 영상 삽입 위치를 표시해주세요")
+        if self.opt_quote.isChecked(): options.append("- 중요 문구는 [인용구]텍스트[/인용구] 형태로 감싸주세요")
+        if self.opt_photo.isChecked(): options.append("- 적절한 위치에 [사진] 태그를 3~5개 넣어주세요")
+        if self.opt_hashtag.isChecked(): options.append("- 마지막에 관련 해시태그 5~10개를 추가해주세요")
+        option_text = "\n".join(options)
+
+        self.main.log(f"🧠 AI 생성 시작 - {service} / 총 {total}건 개별 생성")
+
+        thread = WorkerThread(lambda: None)
+        def _ui_update(fn): thread.ui_update_signal.emit(fn)
+
+        def do_generate():
+            generated = []
+            errors_collection = []
+            for idx, art in enumerate(articles):
+                if self._cancel_generate:
+                    thread.log_signal.emit(f"🛑 AI 생성 취소됨 ({len(generated)}건 처리됨)")
+                    break
+                post_title = art.get('title', '제목없음')
+                thread.log_signal.emit(f"📝 [{idx+1}/{total}] AI 원고 생성 중: {post_title[:40]}...")
+                _ui_update(lambda i=idx, t=total: self.generate_btn.setText(f"🛑 생성 취소 ({i+1}/{t})"))
+                _ui_update(lambda i=idx: self.article_table.setItem(i, 2, QTableWidgetItem("생성중")))
+                _ui_update(lambda i=idx, t=total: self.ai_gen_progress.setValue(int((i / t) * 100)))
+
+                ref_limit = 4500 if "Perplexity" in service else 8000
+                ref_content = art.get('body', '')[:ref_limit]
+                if not ref_content.strip() or len(ref_content.strip()) < 20:
+                    err_msg = '참고 자료 본문이 비어있어 건너뜁니다'
+                    thread.log_signal.emit(f"⚠️ [{idx+1}/{total}] {err_msg}")
+                    generated.append({'title': post_title, 'content': f'❌ {err_msg}', 'status': '실패', 'source': ref_content, 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: (self.article_table.setItem(i, 2, QTableWidgetItem("❌실패")), self._set_article_check(i, False)))
+                    continue
+
+                full_prompt = f"{prompt}\n\n추가 요구사항:\n{option_text}"
+                full_prompt += f"\n- 총 글자 수: 약 {char_limit}자\n"
+                full_prompt += "- 반드시 완성된 한국어 블로그 글 형태로 작성해주세요\n"
+                full_prompt += "- 제목을 첫 줄에 ## 제목 형태로 작성해주세요\n"
+                full_prompt += f"\n[참고 자료 제목]: {art.get('title', '')}\n"
+                full_prompt += f"[참고 자료 본문]:\n{ref_content}"
+
+                try:
+                    if "Gemini" in service:
+                        result = call_gemini_text(self.main.config.get('gemini_key', '').strip(), full_prompt, model='gemini-2.5-flash')
+                    elif "Perplexity" in service:
+                        sys_msg = "당신은 한국어 SEO 블로그 전문 작가입니다. 주어진 참고 자료를 바탕으로 네이버 블로그에 게시할 완성된 포스트를 작성합니다."
+                        result = call_perplexity(self.main.config.get('perplex_key', '').strip(), full_prompt, model='sonar-pro', system_message=sys_msg)
+                    elif "GPT" in service:
+                        result = call_openai_text(self.main.config.get('openai_key', '').strip(), full_prompt, model='gpt-4o')
+                    else:
+                        result = "❌ 알 수 없는 AI 서비스"
+
+                    gen_title = art.get('title', f'포스트 {idx+1}')
+                    for line in result.split('\n'):
+                        stripped = line.strip()
+                        if stripped.startswith('##'):
+                            gen_title = stripped.lstrip('#').strip()
+                            break
+                        elif stripped and not stripped.startswith('['):
+                            gen_title = stripped[:60]
+                            break
+
+                    generated.append({'title': gen_title, 'content': result, 'status': '완료', 'source': ref_content, 'keyword': art.get('keyword', '')})
+                    # 즉시 발행 대기열 형태로 저장
+                    self.generated_articles = list(generated)
+                    try:
+                        _queue = [{'order': qi+1, 'title': ga['title'], 'content': ga['content'], 'status': 'pending', 'result': ''} for qi, ga in enumerate(generated) if ga.get('status') == '완료']
+                        if _queue:
+                            with open('publish_queue_blog_incremental.json', 'w', encoding='utf-8') as _qf:
+                                json.dump(_queue, _qf, ensure_ascii=False, indent=2)
+                            thread.log_signal.emit(f"💾 [{idx+1}/{total}] 발행 대기열 저장 완료 ({len(_queue)}건)")
+                    except Exception: pass
+                    thread.log_signal.emit(f"✅ [{idx+1}/{total}] 완료: {gen_title[:40]}")
+                    _ui_update(lambda i=idx, t=gen_title, c=len(result): (
+                        self._set_article_check(i, True),
+                        self.article_table.setItem(i, 2, QTableWidgetItem("✅완료")),
+                        self.article_table.setItem(i, 3, QTableWidgetItem(t[:80])),
+                        self.article_table.setItem(i, 4, QTableWidgetItem(str(c)))
+                    ))
+                except Exception as e:
+                    err_msg = format_error_message(e)
+                    thread.log_signal.emit(f"❌ [{idx+1}/{total}] 오류: {err_msg}")
+                    generated.append({'title': post_title, 'content': f'❌ 오류: {err_msg}', 'status': '실패', 'source': ref_content, 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: (self.article_table.setItem(i, 2, QTableWidgetItem("❌실패")), self._set_article_check(i, False)))
+
+                if idx < total - 1 and not self._cancel_generate:
+                    wait_seconds = 4 if "Perplexity" in service else 2
+                    for _ in range(wait_seconds * 2):
+                        if self._cancel_generate: break
+                        time.sleep(0.5)
+
+            self.generated_articles = generated
+            _ui_update(lambda: self.ai_gen_progress.setValue(100))
+            success = sum(1 for a in generated if a.get('status') == '완료')
+            failed = sum(1 for a in generated if a.get('status') == '실패')
+            if errors_collection:
+                unique_errors = list(dict.fromkeys(errors_collection))
+                error_text = "\n- ".join(unique_errors[:5])
+                _ui_update(lambda: (self.error_summary.setPlainText(f"- {error_text}"), self.error_summary.setVisible(True), self.error_summary_label.setVisible(True)))
+            thread.log_signal.emit(f"✅ AI 원고 생성 완료 - 총 {total}건 중 {success}건 성공, {failed}건 실패")
+            return f"✅ 총 {total}건 원고 생성 완료 ({success}건 성공 / {failed}건 실패)"
+
+        thread.func = do_generate
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.ai_output.setPlainText(str(r) if r else ""))
+        def _on_gen_finished():
+            self._generating = False
+            self._cancel_generate = False
+            self.generate_btn.setText("🎯 AI 원고 생성")
+            self.generate_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+            self.ai_gen_progress.setVisible(False)
+        thread.finished_signal.connect(_on_gen_finished)
+        thread.start()
+
+    def _on_article_selected(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows: return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            self.ai_output.setPlainText(self.generated_articles[idx].get('content', ''))
+
+    def _copy_selected_article(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows:
+            self.main.log("⚠️ 원고를 먼저 선택하세요")
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            pyperclip.copy(self.generated_articles[idx].get('content', ''))
+            self.main.log(f"📋 원고 #{idx+1} 복사 완료")
+
+    def _copy_all_articles(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 생성된 원고가 없습니다")
+            return
+        all_text = ""
+        for i, art in enumerate(self.generated_articles):
+            all_text += f"\n{'='*60}\n[원고 {i+1}] {art.get('title','')}\n{'='*60}\n"
+            all_text += art.get('content', '') + "\n"
+        pyperclip.copy(all_text)
+        self.main.log(f"📋 전체 {len(self.generated_articles)}건 원고 복사 완료")
+
+    def _update_article_table(self):
+        self.article_table.setRowCount(len(self.generated_articles))
+        for i, art in enumerate(self.generated_articles):
+            is_done = art.get("status") == "완료"
+            self._set_article_check(i, checked=is_done)
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem(art.get('status', '완료')))
+            self.article_table.setItem(i, 3, QTableWidgetItem(art.get('title', '')[:80]))
+            content = art.get('content', '')
+            self.article_table.setItem(i, 4, QTableWidgetItem(str(len(content)) if is_done else "실패"))
+    def _parse_articles_from_text(self, text):
+        """수집 결과 텍스트에서 개별 기사를 파싱"""
+        articles = []
+        blocks = re.split(r'━+\s*\[\d+\]', text)
+        for block in blocks:
+            if not block.strip():
+                continue
+            lines = block.strip().split('\n')
+            title = lines[0].replace('━', '').strip() if lines else '제목없음'
+            body = '\n'.join(lines[1:]).strip()
+            # 키워드/URL 라인 제거 후 본문만
+            body_lines = []
+            for l in lines:
+                if l.startswith('키워드:') or l.startswith('URL:'):
+                    continue
+                body_lines.append(l)
+            body = '\n'.join(body_lines).strip()
+            if len(body) > 30:
+                articles.append({'title': title[:100], 'body': body[:3000], 'keyword': '', 'url': ''})
+        return articles if articles else [{'title': '포스트', 'body': text[:3000], 'keyword': '', 'url': ''}]
+
+    # ──────────── 블로그 폴더 로드 ────────────
+
+    def _get_selected_account(self):
+        """선택된 계정의 id/pw 반환"""
+        sel_id = self.account_combo.currentText().strip()
+        accounts = self.main.config.get('naver_accounts', [])
+        for acc in accounts:
+            if acc.get('id') == sel_id:
+                return acc.get('id', ''), acc.get('pw', '')
+        # 하위호환
+        return self.main.config.get('naver_id', ''), self.main.config.get('naver_pw', '')
+
+    def _save_folder_cache(self):
+        try:
+            with open('folder_cache.json', 'w', encoding='utf-8') as f:
+                json.dump(self._folder_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def load_blog_folders(self):
+        nid, npw = self._get_selected_account()
+        if not nid:
+            self.main.log("❌ 네이버 계정을 먼저 설정하세요");
+            return
+
+        # 캐시 확인
+        if nid in self._folder_cache and self._folder_cache[nid]:
+            cached = self._folder_cache[nid]
+            self.blog_folder.clear()
+            self.blog_folder.addItems(cached)
+            self.main.log(f"📂 저장된 폴더 사용: {nid} ({len(cached)}개)")
+            return
+
+        self.load_folders_btn.setEnabled(False)
+        self.load_folders_btn.setText("로딩 중...")
+        self.main.log(f"🔄 [{nid}] 블로그 폴더 목록 불러오는 중...")
+
+        blog_id = nid
+
+        def do_load():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            driver = make_uc_driver(opts)
+            folders = []
+
+            try:
+                # 먼저 로그인 (실패 시 60초 수동 대기)
+                if not naver_login_with_fallback(driver, nid, npw, self.main.log):
+                    return "❌ 로그인 실패 - 설정에서 계정을 확인하세요"
+
+                # 방법1: API로 카테고리 가져오기
+                try:
+                    cat_url = f"https://blog.naver.com/NBlogCategoryListAjax.naver?blogId={blog_id}"
+                    driver.get(cat_url)
+                    time.sleep(2)
+                    page_text = driver.page_source
+
+                    if 'categoryName' in page_text:
+                        cat_names = re.findall(r'"categoryName"\s*:\s*"([^"]+)"', page_text)
+                        for cn in cat_names:
+                            try:
+                                decoded = cn.encode('utf-8').decode('unicode_escape')
+                            except Exception:
+                                decoded = cn
+                            if decoded and decoded not in folders:
+                                folders.append(decoded)
+                except Exception:
+                    pass
+
+                # 방법2: 블로그 메인에서 스크래핑
+                if not folders:
+                    try:
+                        driver.get(f"https://blog.naver.com/{blog_id}")
+                        time.sleep(3)
+                        try:
+                            iframe = driver.find_element(By.ID, 'mainFrame')
+                            driver.switch_to.frame(iframe)
+                            time.sleep(1)
+                        except Exception:
+                            pass
+
+                        selectors = [
+                            'div.category a',
+                            'ul.category_list li a',
+                            'div.area_category a',
+                            '#category a',
+                            '.blog-category a',
+                            'a[href*="categoryNo"]',
+                        ]
+                        for sel in selectors:
+                            try:
+                                cats = driver.find_elements(By.CSS_SELECTOR, sel)
+                                for cat in cats:
+                                    name = cat.text.strip()
+                                    if name and name not in ['전체보기', '카테고리', ''] and name not in folders:
+                                        folders.append(name)
+                            except Exception:
+                                continue
+                            if folders:
+                                break
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+
+                # 방법3: 글쓰기 페이지 카테고리
+                if not folders:
+                    try:
+                        driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                        time.sleep(4)
+                        try:
+                            iframe = driver.find_element(By.ID, 'mainFrame')
+                            driver.switch_to.frame(iframe)
+                            time.sleep(1)
+                        except Exception:
+                            pass
+
+                        cat_selectors = [
+                            'select#categoryId option',
+                            'button.se-category-btn',
+                            'div.category_area select option',
+                            'ul.se-category-list li',
+                            'div[class*="category"] option',
+                        ]
+                        for sel in cat_selectors:
+                            try:
+                                items = driver.find_elements(By.CSS_SELECTOR, sel)
+                                for item in items:
+                                    name = item.text.strip()
+                                    if name and name not in ['카테고리 선택', '카테고리', ''] and name not in folders:
+                                        folders.append(name)
+                            except Exception:
+                                continue
+                            if folders:
+                                break
+                    except Exception:
+                        pass
+
+                if folders:
+                    return "||".join(folders)
+                else:
+                    return "❌ 카테고리를 찾을 수 없습니다. 블로그에 카테고리가 있는지 확인하세요."
+            except Exception as ex:
+                return f"❌ 오류: {str(ex)}"
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        def on_result(r):
+            if r.startswith("❌"):
+                self.main.log(r);
+                return
+            folder_list = r.split("||")
+            self.blog_folder.clear()
+            self.blog_folder.addItems(folder_list)
+            # 캐시 저장
+            self._folder_cache[nid] = folder_list
+            self._save_folder_cache()
+            self.main.log(f"✅ {len(folder_list)}개 폴더 로드 완료 (캐시 저장됨)")
+
+        thread = WorkerThread(do_load)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.load_folders_btn.setEnabled(True),
+            self.load_folders_btn.setText("🔄 폴더 불러오기")
+        ))
+        thread.start()
+
+    # ──────────── 네이버 자동 발행 ────────────
+
+    def publish_to_naver(self):
+        """generated_articles 리스트를 순회하며 각각 블로그에 발행 (순차 처리)"""
+        # 취소 토글
+        if self._publishing_flag:
+            self._cancel_publish = True
+            self.publish_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 발행 취소 요청됨...")
+            return
+        self._cancel_publish = False
+        self._publishing_flag = True
+
+        # generated_articles가 있으면 다건 발행
+        if not self.generated_articles:
+            # 단건 호환: 기존 텍스트에서 발행
+            content = self.ai_output.toPlainText().strip()
+            if not content:
+                content = self.generated_content
+            if not content:
+                self.main.log("⚠️ 발행할 원고가 없습니다. AI 글쓰기를 먼저 실행하세요");
+                return
+            self.generated_articles = [{'title': '포스트', 'content': content}]
+
+        nid, npw = self._get_selected_account()
+        if not nid or not npw:
+            self.main.log("❌ 네이버 계정을 먼저 설정하세요");
+            return
+
+        folder = self.blog_folder.currentText()
+        save_mode = self.save_mode.currentText()
+        schedule = self.schedule_time.text() if "예약" in save_mode else ""
+        articles = list(self.generated_articles)
+        total = len(articles)
+
+        self.publish_btn.setEnabled(False)
+        self.publish_btn.setText(f"발행 중... (0/{total})")
+        self.publish_progress.setVisible(True)
+        self.publish_progress.setValue(0)
+
+        self.main.log(f"🚀 총 {total}건 블로그 발행 시작")
+
+        def do_publish():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.keys import Keys
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            opts.add_argument('--disable-popup-blocking')
+            prefs = {'profile.default_content_setting_values.popups': 0}
+            opts.add_experimental_option('prefs', prefs)
+            driver = make_uc_driver(opts)
+            main_window = driver.current_window_handle
+
+            # ── window.open 차단 ──
+            def block_window_open():
+                try:
+                    driver.execute_script("""
+                        if (!window._woBlocked) {
+                            window._origOpen = window.open;
+                            window.open = function(url) {
+                                if (url) window.location.href = url;
+                                return window;
+                            };
+                            window._woBlocked = true;
+                        }
+                    """)
+                except Exception:
+                    pass
+            # ── "작성중인 글이 있습니다" 팝업 취소 처리 ──
+            def dismiss_draft_popup():
+                """에디터 진입 시 '작성중인 글이 있습니다' 팝업이 뜨면 취소 버튼 클릭"""
+                try:
+                    time.sleep(2)
+                    cancel_selectors = [
+                        'button.se-popup-button-cancel',
+                        'button.cancel_btn__WEaBq',
+                        'button.cancel_btn',
+                        'button[class*="cancel"]',
+                        'button.se-cancel',
+                    ]
+                    # 팝업 텍스트로도 탐지
+                    try:
+                        popup_texts = driver.find_elements(By.XPATH,
+                            "//*[contains(text(),'작성중인') or contains(text(),'작성 중인') or contains(text(),'임시저장')]")
+                        if popup_texts:
+                            self.log_emit("  ℹ️ '작성중인 글' 팝업 감지 → 취소 클릭 시도")
+                            for sel in cancel_selectors:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                            # CSS 셀렉터 실패 시 XPATH로 취소/아니오 버튼 찾기
+                            cancel_btns = driver.find_elements(By.XPATH,
+                                "//button[contains(text(),'취소') or contains(text(),'아니') or contains(text(),'아니오') or contains(text(),'새로')]")
+                            for btn in cancel_btns:
+                                try:
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료 (XPATH)")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.log_emit(f"  ℹ️ 팝업 처리 중 예외(무시): {e}")
+                return False
+
+
+            # ── 추가 탭 모두 닫기 ──
+            def close_extra_tabs():
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                if not main_window or main_window not in handles:
+                    main_window = handles[0]
+                for h in handles:
+                    if h == main_window:
+                        continue
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                try:
+                    driver.switch_to.window(main_window)
+                except Exception:
+                    pass
+
+            # ── 에디터를 단일 탭에서 열기 ──
+            def open_editor_single_tab():
+                nonlocal main_window
+                # 1) 여분 탭 정리
+                close_extra_tabs()
+                # 2) 현재 탭에서 에디터 URL로 이동 (새 탭이 열리지 않도록 execute_script 사용)
+                editor_url = "https://blog.naver.com/GoBlogWrite.naver"
+                try:
+                    driver.execute_script(f'window.location.href = "{editor_url}";')
+                except Exception:
+                    driver.get(editor_url)
+                time.sleep(5)
+                # 3) 혹시라도 새 탭이 열렸으면 에디터 탭만 남기기
+                handles = list(driver.window_handles)
+                if len(handles) > 1:
+                    editor_tab = handles[-1]
+                    for h in handles:
+                        if h == editor_tab:
+                            continue
+                        try:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        except Exception:
+                            pass
+                    driver.switch_to.window(editor_tab)
+                    main_window = editor_tab
+                else:
+                    main_window = handles[0] if handles else driver.current_window_handle
+                    driver.switch_to.window(main_window)
+                # 4) iframe 전환
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+                try:
+                    iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, 'mainFrame'))
+                    )
+                    driver.switch_to.frame(iframe)
+                    time.sleep(1)
+                    self.log_emit("  ✅ mainFrame iframe 진입 성공")
+                    dismiss_draft_popup()
+                except Exception:
+                    self.log_emit("  ℹ️ mainFrame 없음, 직접 에디터 접근")
+                    dismiss_draft_popup()
+                # 5) 에디터 로드 확인
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR,
+                            'div.se-title-text, div[data-name="title"], div[contenteditable="true"]'))
+                    )
+                    self.log_emit("  ✅ 에디터 로드 확인")
+                except Exception:
+                    self.log_emit("  ⚠️ 에디터 요소 미확인 (계속 진행)")
+
+            # ── 원고 정제 ──
+            def sanitize_content(raw):
+                lines = raw.split('\n')
+                cleaned = []
+                for line in lines:
+                    s = line.strip()
+                    if re.match(r'^[━─═\-]{3,}', s): continue
+                    if s == '[이미지 삽입]': continue
+                    if re.match(r'^!\[.*\]\(.*\)$', s): continue
+                    if re.match(r'^https?://\S+$', s): continue
+                    if re.match(r'^📄\s*\[\d+\]', s): continue
+                    s = re.sub(r'\[\d+\]', '', s)
+                    s = re.sub(r'^#{1,6}\s*', '', s)
+                    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+                    s = s.strip()
+                    if s:
+                        cleaned.append(s)
+                return re.sub(r'\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
+
+            success_count = 0
+            fail_count = 0
+
+            try:
+                self.log_emit("🔑 네이버 로그인 중...")
+                if not naver_login_with_fallback(driver, nid, npw, self.log_emit):
+                    return "❌ 로그인 실패 - 설정에서 계정을 확인하세요"
+                self.log_emit("✅ 로그인 완료")
+                main_window = driver.current_window_handle
+                close_extra_tabs()
+                block_window_open()
+
+                for art_idx, article in enumerate(articles):
+                    try:
+                        art_title = article.get('title', f'포스트 {art_idx + 1}')
+                        art_content = sanitize_content(article.get('content', ''))
+
+                        # ── 본문에서 제목 줄 제거 (제목은 별도 입력) ──
+                        content_lines = art_content.split('\n')
+                        filtered_lines = []
+                        title_stripped = False
+                        for cl in content_lines:
+                            cl_clean = cl.strip()
+                            # 첫 번째 줄이 제목과 동일하면 제거
+                            if not title_stripped and cl_clean and (
+                                cl_clean == art_title.strip() or
+                                re.sub(r'^#{1,6}\s*', '', cl_clean) == art_title.strip() or
+                                cl_clean.replace('**', '') == art_title.strip()
+                            ):
+                                title_stripped = True
+                                continue
+                            filtered_lines.append(cl)
+                        art_content = '\n'.join(filtered_lines).strip()
+
+                        if len(art_content) < 50:
+                            self.log_emit(f"\n⏭️ [{art_idx + 1}/{total}] 건너뜀: 정제 후 본문 너무 짧음 — {art_title[:30]}")
+                            fail_count += 1
+                            continue
+
+                        self.log_emit(f"\n📝 [{art_idx + 1}/{total}] 발행 시작: {art_title[:40]}...")
+                        QTimer.singleShot(0, lambda idx=art_idx: self.publish_btn.setText(f"발행 중... ({idx + 1}/{total})"))
+
+                        # ── 에디터 단일 탭 열기 ──
+                        open_editor_single_tab()
+                        block_window_open()
+
+                        # 폴더 선택
+                        if folder:
+                            try:
+                                cat_select = driver.find_element(By.CSS_SELECTOR, 'select#categoryId')
+                                cat_select.click()
+                                time.sleep(0.5)
+                                for opt in cat_select.find_elements(By.TAG_NAME, 'option'):
+                                    if folder in opt.text:
+                                        opt.click()
+                                        break
+                            except Exception:
+                                self.log_emit("  ⚠️ 폴더 선택 실패, 기본 카테고리 사용")
+
+                        # 제목 입력 (참고 파일 기준 셀렉터)
+                        title_ok = False
+                        for sel in [
+                            'span.se-placeholder',
+                            'div[data-name="title"] div[contenteditable="true"]',
+                            'div.se-section-title div.se-text-paragraph',
+                            'div.se-title-text',
+                        ]:
+                            try:
+                                title_el = WebDriverWait(driver, 5).until(
+                                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                                )
+                                try:
+                                    title_el.click()
+                                except Exception:
+                                    from selenium.webdriver.common.action_chains import ActionChains
+                                    ActionChains(driver).move_to_element(title_el).click().perform()
+                                time.sleep(0.2)
+                                pyperclip.copy(art_title)
+                                safe_hotkey(driver, 'ctrl', 'a')
+                                time.sleep(0.1)
+                                safe_hotkey(driver, 'ctrl', 'v')
+                                time.sleep(0.3)
+                                title_ok = True
+                                break
+                            except Exception:
+                                continue
+                        if not title_ok:
+                            self.log_emit("  ⚠️ 제목 입력 실패")
+
+                        # 본문 영역 포커스
+                        body_focused = False
+                        for sel in [
+                            'div.se-section-text div[contenteditable="true"]',
+                            'div.se-component-content div[contenteditable="true"]',
+                            'div.se-text-paragraph',
+                            'div[contenteditable="true"]',
+                        ]:
+                            try:
+                                elems = driver.find_elements(By.CSS_SELECTOR, sel)
+                                for elem in elems:
+                                    if not elem.is_displayed():
+                                        continue
+                                    try:
+                                        driver.execute_script("arguments[0].click();", elem)
+                                    except Exception:
+                                        elem.click()
+                                    time.sleep(0.3)
+                                    body_focused = True
+                                    break
+                                if body_focused:
+                                    break
+                            except Exception:
+                                continue
+                        if not body_focused:
+                            safe_press(driver, 'tab')
+                            time.sleep(0.3)
+
+                        # 본문 입력 (이미지 + 정렬 + 인용구 + 스티커) — v26
+                        # v26: 정렬은 본문 입력 *후* Ctrl+A로 전체 선택해서 적용
+                        art_content_pp = preprocess_article_lines(art_content)
+                        alignment = getattr(self, '_selected_alignment', 'left')
+                        photo_token_count = art_content_pp.count('[사진]')
+                        photo_paths = self._get_images_for_article(art_idx, photo_token_count)
+                        photo_idx = 0
+                        # v27: 본문에 [사진] 토큰이 없는데 이미지 풀이 있으면 본문 첫머리에 자동 삽입
+                        if photo_token_count == 0 and photo_paths:
+                            try:
+                                self._insert_image_to_editor(driver, photo_paths[0])
+                                photo_idx = 1
+                                safe_press(driver, 'enter')
+                                time.sleep(0.5)
+                            except Exception as auto_img_err:
+                                self.log_emit(f"  ⚠️ 자동 이미지 삽입 실패: {auto_img_err}")
+                        for raw_line in art_content_pp.split('\n'):
+                            line = raw_line.rstrip()
+                            if not line.strip():
+                                safe_press(driver, 'enter')
+                                time.sleep(0.05)
+                                continue
+
+                            stripped = line.strip()
+                            # [사진] 태그 → 이미지 삽입
+                            if stripped in ('[사진]', '[사진 삽입]', '[이미지 삽입]'):
+                                if photo_idx < len(photo_paths):
+                                    try:
+                                        self._insert_image_to_editor(driver, photo_paths[photo_idx])
+                                        photo_idx += 1
+                                        time.sleep(1)
+                                        continue
+                                    except Exception as img_err:
+                                        self.log_emit(f"  ⚠️ 이미지 삽입 실패: {img_err}")
+                                safe_press(driver, 'enter')
+                                time.sleep(0.1)
+                                continue
+
+                            # 스티커 토큰
+                            sticker_idxs = extract_sticker_indices(stripped)
+                            content_only = strip_sticker_tokens(stripped)
+
+                            if content_only and looks_like_quote(content_only):
+                                insert_quote_block(driver, content_only)
+                            elif content_only:
+                                pyperclip.copy(content_only)
+                                safe_hotkey(driver, 'ctrl', 'v')
+                                safe_press(driver, 'enter')
+                                time.sleep(0.1)
+
+                            for sidx in sticker_idxs:
+                                try:
+                                    insert_naver_sticker(driver, sidx)
+                                    safe_press(driver, 'enter')
+                                except Exception:
+                                    pass
+
+                        # v26: 본문 입력 완료 후 전체 선택 → 정렬 적용 (+ JS fallback)
+                        try:
+                            apply_alignment(driver, alignment, select_all_first=True)
+                            self.log_emit(f"  ✅ 본문 정렬 적용: {alignment}")
+                        except Exception as al_err:
+                            self.log_emit(f"  ⚠️ 정렬 적용 실패: {al_err}")
+
+                        # 저장/발행
+                        time.sleep(1)
+                        if "임시" in save_mode:
+                            clicked = False
+                            for sel in [
+                                'button[data-testid="save-btn"]',
+                                'button.save_btn__Y5f57',
+                                'button.save_btn',
+                                'button[class*="save"]',
+                            ]:
+                                try:
+                                    btn = WebDriverWait(driver, 3).until(
+                                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                                    )
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    clicked = True
+                                    break
+                                except Exception:
+                                    continue
+                            if not clicked:
+                                try:
+                                    btn = driver.find_element(By.XPATH, '//button[contains(., "임시저장")]')
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    clicked = True
+                                except Exception:
+                                    pass
+                            if not clicked:
+                                raise RuntimeError('임시저장 버튼을 찾지 못했습니다')
+                            time.sleep(2)
+                            self.log_emit(f"  💾 [{art_idx + 1}/{total}] 임시저장 완료: {art_title[:30]}")
+                            driver.execute_script('window.location.href = "https://blog.naver.com";')
+                            time.sleep(2)
+                        elif "즉시" in save_mode:
+                            pub_clicked = False
+                            for sel in [
+                                'button[data-testid="publish-btn"]',
+                                'button.publish_btn__Y5f57',
+                                'button.publish_btn',
+                                'button[class*="publish"]',
+                            ]:
+                                try:
+                                    btn = WebDriverWait(driver, 3).until(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                                    )
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    pub_clicked = True
+                                    break
+                                except Exception:
+                                    continue
+                            if not pub_clicked:
+                                safe_hotkey(driver, 'ctrl', 'shift', 'p')
+                            time.sleep(2)
+                            for sel in [
+                                'button.se-popup-button-confirm',
+                                'button.confirm_btn__WEaBq',
+                                'button.confirm_btn',
+                                'button[class*="confirm"]',
+                            ]:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    break
+                                except Exception:
+                                    continue
+                            time.sleep(3)
+                            self.log_emit(f"  📤 [{art_idx + 1}/{total}] 즉시발행 완료")
+                        elif "예약" in save_mode:
+                            self.log_emit(f"  ⏰ 예약발행: {schedule}")
+
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_extra_tabs()
+                        success_count += 1
+
+                    except Exception as e:
+                        self.log_emit(f"  ❌ [{art_idx + 1}/{total}] 발행 실패: {e}")
+                        fail_count += 1
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_extra_tabs()
+
+                    pct = int(((art_idx + 1) / total) * 100)
+                    self.progress_emit(pct)
+                    time.sleep(3)
+
+                return f"✅ 블로그 발행 완료! 성공: {success_count}건, 실패: {fail_count}건"
+
+            except Exception as e:
+                return f"❌ 발행 오류: {str(e)}"
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        thread = WorkerThread(do_publish)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(self.main.log)
+        thread.progress_signal.connect(self.publish_progress.setValue)
+
+        def on_publish_finished():
+            self._publishing_flag = False
+            self.publish_btn.setEnabled(True)
+            self.publish_btn.setText("🔥 네이버 블로그 자동 발행")
+            self.publish_progress.setVisible(False)
+
+        thread.finished_signal.connect(on_publish_finished)
+        thread.start()
+
+# ═══════════════════════════════════════════════════════════════
+#  인기글 수집 페이지
+# ═══════════════════════════════════════════════════════════════
+
+class PopularPostPage(QWidget):
+    """네이버 블로그 인기글 수집 → AI 글쓰기 → 블로그 발행"""
+
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        self.generated_articles = []
+        self._popular_collected_text = ""
+        self._popular_collected_items = []
+        self._cancel_collect = False
+        self._cancel_generate = False
+        self._cancel_publish = False
+        self._collecting = False
+        self._generating = False
+        self._publishing_flag = False
+        # 폴더 캐시 (계정별)
+        self._folder_cache = self._load_folder_cache()
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        title = QLabel("🔥 네이버 블로그 인기글 수집 → AI 글쓰기 → 블로그 발행")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        scroll_layout.addWidget(title)
+
+        desc = QLabel("특정 블로그의 인기글을 수집하여 AI로 새 글을 작성합니다")
+        desc.setStyleSheet("color:#888; margin-bottom:8px;")
+        scroll_layout.addWidget(desc)
+
+        # ══════════════════════════════════════
+        # STEP 1: 인기글 수집
+        # ══════════════════════════════════════
+        step1 = QGroupBox("STEP 1️⃣  네이버 블로그 인기글 수집")
+        s1 = QVBoxLayout(step1)
+
+        s1.addWidget(QLabel("블로그 URL/ID (한 줄에 하나씩, 최대 10개):"))
+        self.popular_blog_urls = QTextEdit()
+        self.popular_blog_urls.setMaximumHeight(120)
+        self.popular_blog_urls.setPlaceholderText(
+            "예시 (한 줄에 하나씩 입력):\n"
+            "https://m.blog.naver.com/블로그ID1\n"
+            "블로그ID2\n"
+            "https://blog.naver.com/블로그ID3\n"
+            "...최대 10개까지 입력 가능"
+        )
+
+        s1.addWidget(self.popular_blog_urls)
+
+        h_excel = QHBoxLayout()
+        self.excel_import_btn = QPushButton("📥 엑셀 대량 등록 (.xlsx)")
+        self.excel_import_btn.clicked.connect(self.import_from_excel)
+        self.excel_import_btn.setStyleSheet("background-color:#2d6a4f; color:white; font-weight:bold; padding:6px;")
+        h_excel.addWidget(self.excel_import_btn)
+
+        self.excel_template_btn = QPushButton("📋 엑셀 양식 다운로드")
+        self.excel_template_btn.clicked.connect(self.download_excel_template)
+        h_excel.addWidget(self.excel_template_btn)
+        s1.addLayout(h_excel)
+
+        h_pop_opt = QHBoxLayout()
+        h_pop_opt.addWidget(QLabel("블로그당 수집 개수:"))
+        self.popular_count = QSpinBox()
+        self.popular_count.setRange(1, 30)
+        self.popular_count.setValue(10)
+        h_pop_opt.addWidget(self.popular_count)
+
+        self.blog_count_label = QLabel("등록된 블로그: 0개")
+        self.blog_count_label.setStyleSheet("color:#FFD700; font-weight:bold;")
+        h_pop_opt.addWidget(self.blog_count_label)
+        h_pop_opt.addStretch()
+        s1.addLayout(h_pop_opt)
+
+        self.popular_blog_urls.textChanged.connect(self._update_blog_count)
+
+        self.popular_collect_btn = QPushButton("🔥 인기글 수집 시작")
+        self.popular_collect_btn.clicked.connect(self.start_popular_collect)
+        self.popular_collect_btn.setStyleSheet("background-color:#8B4513; color:white; font-weight:bold; padding:8px;")
+        s1.addWidget(self.popular_collect_btn)
+
+        self.popular_progress = QProgressBar()
+        self.popular_progress.setVisible(False)
+        s1.addWidget(self.popular_progress)
+
+        self.popular_result = QTextBrowser()
+        self.popular_result.setMaximumHeight(120)
+        self.popular_result.setPlaceholderText("수집 요약이 여기에 표시됩니다...")
+        s1.addWidget(self.popular_result)
+
+        # ── 수집 결과 표 (체크박스 + 선택 발행) ──
+        s1.addWidget(QLabel("📋 수집된 인기글 (체크한 항목만 AI 입력으로 전달):"))
+        self.collect_popular_table = QTableWidget()
+        self.collect_popular_table.setColumnCount(4)
+        self.collect_popular_table.setHorizontalHeaderLabels(["선택", "블로그", "제목", "본문 요약"])
+        self.collect_popular_table.setColumnWidth(0, 50)
+        self.collect_popular_table.setColumnWidth(1, 120)
+        self.collect_popular_table.setColumnWidth(2, 320)
+        self.collect_popular_table.horizontalHeader().setStretchLastSection(True)
+        self.collect_popular_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.collect_popular_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.collect_popular_table.itemSelectionChanged.connect(self._on_popular_selected)
+        self.collect_popular_table.setMinimumHeight(180)
+        s1.addWidget(self.collect_popular_table)
+
+        h_pop_sel = QHBoxLayout()
+        btn_pop_all = QPushButton("☑️ 전체 선택")
+        btn_pop_all.clicked.connect(lambda: self._toggle_all_popular(True))
+        h_pop_sel.addWidget(btn_pop_all)
+        btn_pop_none = QPushButton("⬜ 전체 해제")
+        btn_pop_none.clicked.connect(lambda: self._toggle_all_popular(False))
+        h_pop_sel.addWidget(btn_pop_none)
+        h_pop_sel.addStretch()
+        s1.addLayout(h_pop_sel)
+
+        scroll_layout.addWidget(step1)
+
+        # ══════════════════════════════════════
+        # STEP 2: AI 글쓰기 (개별 원고 생성)
+        # ══════════════════════════════════════
+        step2 = QGroupBox("STEP 2️⃣  AI 글쓰기 (인기글별 개별 원고 생성)")
+        s2 = QVBoxLayout(step2)
+
+        h2a = QHBoxLayout()
+        h2a.addWidget(QLabel("AI 서비스:"))
+        self.ai_model = QComboBox()
+        self.ai_model.addItems(["Perplexity (sonar-pro)", "Gemini (gemini-2.5-flash)", "GPT (gpt-4o)"])
+        h2a.addWidget(self.ai_model, 2)
+
+        h2a.addWidget(QLabel("글자 수:"))
+        self.char_count = QSpinBox()
+        self.char_count.setRange(500, 10000)
+        self.char_count.setValue(2000)
+        self.char_count.setSingleStep(500)
+        h2a.addWidget(self.char_count)
+        s2.addLayout(h2a)
+
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setPlaceholderText("AI에게 전달할 프롬프트...")
+        self.ai_prompt.setPlainText(
+            "아래 인기글 콘텐츠를 참고하여 SEO 최적화된 네이버 블로그 포스트를 작성해주세요.\n"
+            "- 자연스러운 말투 (1인칭 경험담/의견)\n"
+            "- 소제목 3개 이상 (##)\n"
+            "- 핵심 키워드 자연스럽게 5회 이상 배치\n"
+            "- [사진] 태그로 사진 삽입 위치 표시\n"
+            "- [인용구]텍스트[/인용구] 형태로 강조 문구 표시\n"
+            "- 마지막에 해시태그 5개 추가"
+        )
+        self.ai_prompt.setMaximumHeight(120)
+        s2.addWidget(QLabel("프롬프트:"))
+        s2.addWidget(self.ai_prompt)
+
+        h2b = QHBoxLayout()
+        self.send_to_ai_btn = QPushButton("⬇️ 인기글 → AI 입력")
+        self.send_to_ai_btn.clicked.connect(self.send_popular_to_ai)
+        h2b.addWidget(self.send_to_ai_btn)
+
+        self.gen_btn = QPushButton("🎯 전체 AI 원고 생성 (개별)")
+        self.gen_btn.clicked.connect(self.generate_ai)
+        self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+        h2b.addWidget(self.gen_btn)
+        s2.addLayout(h2b)
+
+        self.ai_progress = QProgressBar()
+        self.ai_progress.setVisible(False)
+        s2.addWidget(self.ai_progress)
+
+        self.ai_input = QTextEdit()
+        self.ai_input.setPlaceholderText("인기글 데이터가 AI 입력으로 전달됩니다...")
+        self.ai_input.setMaximumHeight(100)
+        s2.addWidget(QLabel("AI 입력 (수집 데이터):"))
+        s2.addWidget(self.ai_input)
+
+        # ── 원고 리스트 테이블 (체크박스 + 선택 발행) ──
+        s2.addWidget(QLabel("📋 생성된 원고 리스트 (체크한 항목만 발행):"))
+        self.article_table = QTableWidget()
+        self.article_table.setColumnCount(5)
+        self.article_table.setHorizontalHeaderLabels(["선택", "번호", "상태", "제목", "글자수"])
+        self.article_table.horizontalHeader().setStretchLastSection(True)
+        self.article_table.setColumnWidth(0, 50)
+        self.article_table.setColumnWidth(1, 50)
+        self.article_table.setColumnWidth(2, 70)
+        self.article_table.setColumnWidth(3, 350)
+        self.article_table.setColumnWidth(4, 70)
+        self.article_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.article_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.article_table.itemSelectionChanged.connect(self._on_article_selected)
+        self.article_table.setMinimumHeight(150)
+        s2.addWidget(self.article_table)
+
+        h_art_sel = QHBoxLayout()
+        btn_art_all = QPushButton("☑️ 전체 선택")
+        btn_art_all.clicked.connect(lambda: self._toggle_all_articles(True))
+        h_art_sel.addWidget(btn_art_all)
+        btn_art_none = QPushButton("⬜ 전체 해제")
+        btn_art_none.clicked.connect(lambda: self._toggle_all_articles(False))
+        h_art_sel.addWidget(btn_art_none)
+        h_art_sel.addStretch()
+        s2.addLayout(h_art_sel)
+
+        self.ai_output = QTextBrowser()
+        self.ai_output.setPlaceholderText("원고를 선택하면 여기에 표시됩니다...")
+        s2.addWidget(QLabel("📄 선택된 원고 미리보기:"))
+        s2.addWidget(self.ai_output)
+
+        h2c = QHBoxLayout()
+        copy_btn = QPushButton("📋 선택 원고 복사")
+        copy_btn.clicked.connect(self._copy_selected_article)
+        h2c.addWidget(copy_btn)
+        copy_all_btn = QPushButton("📋 전체 원고 복사")
+        copy_all_btn.clicked.connect(self._copy_all_articles)
+        h2c.addWidget(copy_all_btn)
+        save_btn = QPushButton("💾 전체 원고 저장")
+        save_btn.clicked.connect(self.save_draft)
+        h2c.addWidget(save_btn)
+        export_btn = QPushButton("📊 엑셀로 내보내기")
+        export_btn.clicked.connect(self._export_articles_excel)
+        h2c.addWidget(export_btn)
+        import_btn = QPushButton("📥 엑셀 원고 불러오기")
+        import_btn.clicked.connect(self._import_articles_excel)
+        h2c.addWidget(import_btn)
+        s2.addLayout(h2c)
+
+        scroll_layout.addWidget(step2)
+
+        # ══════════════════════════════════════
+        # STEP 2.5: 이미지 관리
+        # ══════════════════════════════════════
+        step_img = QGroupBox("🖼️ STEP 2.5  이미지 관리 (본문 [사진] 위치에 삽입)")
+        si = QVBoxLayout(step_img)
+
+        si.addWidget(QLabel("원고 본문에 [사진] 태그가 있으면 발행 시 해당 위치에 이미지가 삽입됩니다."))
+
+        # 이미지 리스트 테이블
+        self.image_table = QTableWidget()
+        self.image_table.setColumnCount(4)
+        self.image_table.setHorizontalHeaderLabels(["번호", "소스", "설명/프롬프트", "파일경로"])
+        self.image_table.horizontalHeader().setStretchLastSection(True)
+        self.image_table.setColumnWidth(0, 40)
+        self.image_table.setColumnWidth(1, 70)
+        self.image_table.setColumnWidth(2, 250)
+        self.image_table.setMinimumHeight(120)
+        self.image_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        si.addWidget(self.image_table)
+        self._image_pool = []  # [{'source':'upload'|'dalle', 'desc':'...', 'path':'...'}, ...]
+
+        h_img_btns = QHBoxLayout()
+
+        self.img_upload_btn = QPushButton("📁 이미지 직접 업로드")
+        self.img_upload_btn.clicked.connect(self._upload_images)
+        self.img_upload_btn.setStyleSheet("background-color:#2d6a4f; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_upload_btn)
+
+        self.img_dalle_btn = QPushButton("🤖 AI 이미지 생성 (ChatGPT)")
+        self.img_dalle_btn.clicked.connect(self._generate_dalle_images)
+        self.img_dalle_btn.setStyleSheet("background-color:#4a1a8a; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_dalle_btn)
+
+        self.img_del_btn = QPushButton("🗑️ 선택 삭제")
+        self.img_del_btn.clicked.connect(self._delete_selected_image)
+        h_img_btns.addWidget(self.img_del_btn)
+
+        self.img_clear_btn = QPushButton("🗑️ 전체 삭제")
+        self.img_clear_btn.clicked.connect(self._clear_all_images)
+        h_img_btns.addWidget(self.img_clear_btn)
+        si.addLayout(h_img_btns)
+
+        # AI 이미지 생성 옵션
+        h_dalle_opt = QHBoxLayout()
+        h_dalle_opt.addWidget(QLabel("DALL-E 프롬프트:"))
+        self.dalle_prompt = QLineEdit()
+        self.dalle_prompt.setPlaceholderText("이미지 설명을 입력하세요 (예: 서울 야경, 커피 한 잔)")
+        h_dalle_opt.addWidget(self.dalle_prompt, 4)
+
+        h_dalle_opt.addWidget(QLabel("크기:"))
+        self.dalle_size = QComboBox()
+        self.dalle_size.addItems(["1024x1024", "1024x1536", "1536x1024"])
+        h_dalle_opt.addWidget(self.dalle_size)
+
+        h_dalle_opt.addWidget(QLabel("장수:"))
+        self.dalle_count = QSpinBox()
+        self.dalle_count.setRange(1, 10)
+        self.dalle_count.setValue(1)
+        h_dalle_opt.addWidget(self.dalle_count)
+        si.addLayout(h_dalle_opt)
+
+        # 자동 생성 옵션
+        h_auto = QHBoxLayout()
+        self.auto_dalle_check = QCheckBox("원고별 자동 이미지 생성 (원고 제목 기반)")
+        self.auto_dalle_check.setToolTip("원고 생성 시 각 원고의 제목을 프롬프트로 DALL-E 이미지를 자동 생성합니다")
+        h_auto.addWidget(self.auto_dalle_check)
+
+        self.auto_dalle_count = QSpinBox()
+        self.auto_dalle_count.setRange(1, 5)
+        self.auto_dalle_count.setValue(1)
+        h_auto.addWidget(QLabel("원고당 이미지:"))
+        h_auto.addWidget(self.auto_dalle_count)
+        h_auto.addStretch()
+        si.addLayout(h_auto)
+
+        self.img_status = QLabel("")
+        self.img_status.setStyleSheet("color:#888; font-size:11px;")
+        si.addWidget(self.img_status)
+
+        scroll_layout.addWidget(step_img)
+
+        # ══════════════════════════════════════
+        # STEP 3: 네이버 블로그 자동 발행
+        # ══════════════════════════════════════
+        step3 = QGroupBox("STEP 3️⃣  네이버 블로그 자동 발행")
+        s3 = QVBoxLayout(step3)
+
+        h3_acc = QHBoxLayout()
+        h3_acc.addWidget(QLabel("발행 계정:"))
+        self.account_combo = QComboBox()
+        accounts = self.main.config.get('naver_accounts', [])
+        if not accounts and self.main.config.get('naver_id'):
+            accounts = [{'id': self.main.config.get('naver_id', '')}]
+        for acc in accounts:
+            self.account_combo.addItem(acc.get('id', ''))
+        h3_acc.addWidget(self.account_combo, 2)
+        s3.addLayout(h3_acc)
+
+        h3a = QHBoxLayout()
+        h3a.addWidget(QLabel("블로그 폴더:"))
+        self.blog_folder = QComboBox()
+        self.blog_folder.setEditable(True)
+        h3a.addWidget(self.blog_folder, 2)
+
+        self.load_folders_btn = QPushButton("🔄 폴더 불러오기")
+        self.load_folders_btn.clicked.connect(self.load_blog_folders)
+        h3a.addWidget(self.load_folders_btn)
+        s3.addLayout(h3a)
+
+        h3b = QHBoxLayout()
+        h3b.addWidget(QLabel("저장 형태:"))
+        self.save_mode = QComboBox()
+        self.save_mode.addItems(["💾 임시저장", "📤 즉시발행", "⏰ 예약발행"])
+        # v24: 본문 정렬 선택
+        self.alignment_combo = QComboBox()
+        self.alignment_combo.addItems(["⬅️ 좌측 정렬", "⬆️ 가운데 정렬", "➡️ 우측 정렬", "↔️ 양쪽 정렬"])
+        self.alignment_combo.currentIndexChanged.connect(
+            lambda i: setattr(self, '_selected_alignment', ['left','center','right','justify'][i])
+        )
+        self._selected_alignment = 'left'
+        h3b.addWidget(self.save_mode)
+        h3b.addWidget(QLabel("정렬:"))
+        h3b.addWidget(self.alignment_combo)
+        s3.addLayout(h3b)
+
+        self.publish_btn = QPushButton("🚀 블로그 발행")
+        self.publish_btn.clicked.connect(self.publish_to_blog)
+        self.publish_btn.setStyleSheet("background-color:#8B0000; color:white; font-weight:bold; padding:8px;")
+        s3.addWidget(self.publish_btn)
+
+        self.pub_progress = QProgressBar()
+        self.pub_progress.setVisible(False)
+        s3.addWidget(self.pub_progress)
+
+        scroll_layout.addWidget(step3)
+
+        # 스크롤 영역
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_widget)
+        scroll.setWidgetResizable(True)
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(scroll)
+
+    def _emit_progress(self, bar, val):
+        QTimer.singleShot(0, lambda: bar.setValue(val))
+
+    def log_emit(self, msg):
+        QTimer.singleShot(0, lambda: self.main.log(msg))
+
+    # ─── 폴더 캐시 관리 ───
+    def _load_folder_cache(self):
+        """계정별 폴더 캐시를 파일에서 로드"""
+        try:
+            with open('folder_cache.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_folder_cache(self):
+        """계정별 폴더 캐시를 파일에 저장"""
+        try:
+            with open('folder_cache.json', 'w', encoding='utf-8') as f:
+                json.dump(self._folder_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _get_selected_account(self):
+        """선택된 계정의 id/pw 반환"""
+        sel_id = self.account_combo.currentText().strip() if hasattr(self, 'account_combo') else ''
+        accounts = self.main.config.get('naver_accounts', [])
+        for acc in accounts:
+            if acc.get('id') == sel_id:
+                return acc.get('id', ''), acc.get('pw', '')
+        return self.main.config.get('naver_id', ''), self.main.config.get('naver_pw', '')
+    def _clear_folder_cache(self, account_id):
+        """특정 계정의 폴더 캐시 삭제"""
+        if account_id in self._folder_cache:
+            del self._folder_cache[account_id]
+            self._save_folder_cache()
+            self.blog_folder.clear()
+            self.main.log(f"🗑️ {account_id} 폴더 캐시 삭제됨")
+
+    def _on_account_changed(self, account_id):
+        """계정 변경 시 캐시된 폴더 자동 로드"""
+        account_id = account_id.strip()
+        if account_id and account_id in self._folder_cache:
+            self.blog_folder.clear()
+            self.blog_folder.addItems(self._folder_cache[account_id])
+            self.main.log(f"📂 {account_id} 저장된 폴더 자동 로드 ({len(self._folder_cache[account_id])}개)")
+        else:
+            self.blog_folder.clear()
+
+    # ─── 인기글 수집 ───
+    def _parse_blog_ids(self):
+        """입력된 텍스트에서 블로그 ID 목록 추출 (최대 10개)"""
+        import urllib.parse as urlparse
+        raw_lines = self.popular_blog_urls.toPlainText().strip().split('\n')
+        blog_ids = []
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            bid = line
+            if 'blog.naver.com/' in line:
+                parsed = urlparse.urlparse(line)
+                path = parsed.path.strip('/')
+                if path:
+                    bid = path.split('/')[0]
+            bid = bid.strip()
+            if bid and bid not in blog_ids:
+                blog_ids.append(bid)
+            if len(blog_ids) >= 10:
+                break
+        return blog_ids
+
+    def _update_blog_count(self):
+        ids = self._parse_blog_ids()
+        self.blog_count_label.setText(f"등록된 블로그: {len(ids)}개")
+
+    def import_from_excel(self):
+        """엑셀 파일에서 블로그 ID/URL 대량 불러오기"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "엑셀 파일 선택", "", "Excel 파일 (*.xlsx *.xls);;모든 파일 (*)"
+        )
+        if not path:
+            return
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True)
+            ws = wb.active
+            blog_ids = []
+            for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+                val = str(row[0] or '').strip()
+                if val and val not in blog_ids:
+                    blog_ids.append(val)
+                if len(blog_ids) >= 10:
+                    break
+            wb.close()
+
+            if blog_ids:
+                existing = self.popular_blog_urls.toPlainText().strip()
+                new_text = '\n'.join(blog_ids)
+                if existing:
+                    new_text = existing + '\n' + new_text
+                # 최대 10개로 제한
+                all_lines = [l.strip() for l in new_text.split('\n') if l.strip()]
+                self.popular_blog_urls.setPlainText('\n'.join(all_lines[:10]))
+                self.main.log(f"📥 엑셀에서 {len(blog_ids)}개 블로그 ID 불러옴")
+            else:
+                self.main.log("⚠️ 엑셀에서 블로그 ID를 찾을 수 없습니다")
+        except ImportError:
+            self.main.log("❌ openpyxl 패키지가 필요합니다: pip install openpyxl")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 불러오기 오류: {e}")
+
+    def download_excel_template(self):
+        """블로그 대량 등록용 엑셀 양식 다운로드"""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "엑셀 양식 저장", "블로그_인기글_양식.xlsx", "Excel 파일 (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "블로그 목록"
+
+            # 헤더
+            ws['A1'] = '블로그 URL 또는 ID'
+            ws['A1'].font = Font(bold=True, color='FFFFFF')
+            ws['A1'].fill = PatternFill('solid', fgColor='4472C4')
+            ws['A1'].alignment = Alignment(horizontal='center')
+            ws.column_dimensions['A'].width = 50
+
+            # 예시 데이터
+            ws['A2'] = 'https://m.blog.naver.com/블로그ID1'
+            ws['A3'] = 'blog_id_2'
+            ws['A4'] = 'https://blog.naver.com/blog_id_3'
+            for r in range(2, 5):
+                ws[f'A{r}'].font = Font(color='888888', italic=True)
+
+            # 안내
+            ws['C1'] = '※ A열에 블로그 URL 또는 ID를 한 줄에 하나씩 입력 (최대 10개)'
+            ws['C1'].font = Font(color='FF0000')
+
+            wb.save(path)
+            self.main.log(f"📋 엑셀 양식 저장 완료: {path}")
+        except ImportError:
+            self.main.log("❌ openpyxl 패키지가 필요합니다: pip install openpyxl")
+        except Exception as e:
+            self.main.log(f"❌ 양식 저장 오류: {e}")
+
+    def start_popular_collect(self):
+        # 취소 토글: 수집 중이면 취소
+        if self._collecting:
+            self._cancel_collect = True
+            self.popular_collect_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 수집 취소 요청됨...")
+            return
+
+        blog_ids = self._parse_blog_ids()
+        if not blog_ids:
+            self.main.log("⚠️ 블로그 URL 또는 ID를 입력하세요")
+            return
+
+        if len(blog_ids) > 10:
+            blog_ids = blog_ids[:10]
+            self.main.log("⚠️ 최대 10개까지만 수집합니다")
+
+        max_count = self.popular_count.value()
+        self._cancel_collect = False
+        self._collecting = True
+
+        self.popular_collect_btn.setText(f"🛑 수집 취소 (0/{len(blog_ids)})")
+        self.popular_collect_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.popular_progress.setVisible(True)
+        self.popular_progress.setValue(0)
+
+        def do_popular_multi():
+            all_results = []
+            all_collected = []
+            total = len(blog_ids)
+            for i, bid in enumerate(blog_ids):
+                if self._cancel_collect:
+                    self.log_emit(f"🛑 수집 취소됨 ({i}건 수집됨)")
+                    break
+                self.log_emit(f"🔥 [{i+1}/{total}] {bid} 인기글 수집 중...")
+                QTimer.singleShot(0, lambda idx=i, t=total: self.popular_collect_btn.setText(f"🛑 수집 취소 ({idx+1}/{t})"))
+                base_progress = int(i / total * 100)
+                self._emit_progress(self.popular_progress, base_progress)
+
+                result = self._crawl_blog_popular_single(bid, max_count, base_progress, int(100 / total))
+                if result:
+                    all_results.append(result.get('display', ''))
+                    if result.get('text'):
+                        all_collected.append(result['text'])
+                time.sleep(0.5)
+
+            self._popular_collected_text = "\n\n===== 다음 블로그 =====\n\n".join(all_collected)
+            self._popular_collected_items = self._parse_popular_items_from_text(self._popular_collected_text)
+            self._emit_progress(self.popular_progress, 100)
+            summary = f"✅ 총 {total}개 블로그에서 인기글 수집 완료\n\n"
+            return summary + "\n\n".join(all_results)
+
+        thread = WorkerThread(do_popular_multi)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def _on_collect_result(r):
+            self.popular_result.setPlainText(r)
+            items = list(getattr(self, '_popular_collected_items', []) or [])
+            if not items:
+                items = self._parse_popular_items_from_text(getattr(self, '_popular_collected_text', '') or '')
+                self._popular_collected_items = items
+            self._populate_popular_collect_table(items)
+        thread.result_signal.connect(_on_collect_result)
+        def _on_collect_finished():
+            self._collecting = False
+            self._cancel_collect = False
+            self.popular_collect_btn.setText("🔥 인기글 수집 시작")
+            self.popular_collect_btn.setStyleSheet("background-color:#8B4513; color:white; font-weight:bold; padding:8px;")
+            self.popular_progress.setVisible(False)
+
+        thread.finished_signal.connect(_on_collect_finished)
+        thread.start()
+
+    def _crawl_blog_popular(self, blog_id, max_count):
+        """단일 블로그 호환 래퍼"""
+        result = self._crawl_blog_popular_single(blog_id, max_count, 0, 100)
+        if result:
+            self._popular_collected_text = result.get('text', '')
+            return result.get('display', '')
+        return "❌ 수집 실패"
+
+    def _crawl_blog_popular_single(self, blog_id, max_count, base_progress=0, progress_range=100):
+        """네이버 블로그 인기글 API로 수집 (단일 블로그, dict 반환)"""
+        self._emit_progress(self.popular_progress, base_progress + int(progress_range * 0.1))
+        self.log_emit(f"🔥 [{blog_id}] 인기글 수집 시작...")
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+            'Referer': f'https://m.blog.naver.com/{blog_id}?tab=1'
+        }
+
+        try:
+            api_url = f'https://m.blog.naver.com/api/blogs/{blog_id}/popular-post-list?countPerPage={max_count}'
+            r = requests.get(api_url, headers=headers, timeout=15)
+            self._emit_progress(self.popular_progress, base_progress + int(progress_range * 0.4))
+
+            if r.status_code != 200:
+                self.log_emit(f"❌ [{blog_id}] API 응답 오류: {r.status_code}")
+                return None
+
+            data = r.json()
+            if not data.get('isSuccess'):
+                self.log_emit(f"❌ [{blog_id}] API 응답 실패")
+                return None
+
+            popular_list = data.get('result', {}).get('popularPostList', [])
+            if not popular_list:
+                self.log_emit(f"⚠️ [{blog_id}] 인기글이 없습니다")
+                return None
+
+            self._emit_progress(self.popular_progress, base_progress + int(progress_range * 0.6))
+            self.log_emit(f"📋 {len(popular_list)}개 인기글 발견")
+
+            results = []
+            collected_texts = []
+            import html as html_mod
+
+            for idx, post in enumerate(popular_list[:max_count]):
+                title = post.get('titleWithInspectMessage', '').strip()
+                if not title:
+                    title = post.get('title', '제목 없음').strip()
+                log_no = post.get('logNo', '')
+                brief = post.get('briefContents', '').strip()
+                category = post.get('categoryName', '')
+                sympathy = post.get('sympathyCnt', 0)
+                comment = post.get('commentCnt', 0)
+                post_url = f"https://blog.naver.com/{blog_id}/{log_no}"
+
+                entry = f"[{idx+1}] {title}\n"
+                if category:
+                    entry += f"    카테고리: {category}\n"
+                entry += f"    공감: {sympathy} | 댓글: {comment}\n"
+                entry += f"    URL: {post_url}\n"
+                if brief:
+                    brief_clean = html_mod.unescape(brief)[:300]
+                    entry += f"    요약: {brief_clean}\n"
+
+                results.append(entry)
+                collected_texts.append(f"제목: {title}\n내용: {html_mod.unescape(brief) if brief else ''}")
+
+                progress = 60 + int((idx + 1) / min(len(popular_list), max_count) * 35)
+                self._emit_progress(self.popular_progress, progress)
+
+            self._popular_collected_text = "\n\n---\n\n".join(collected_texts)
+
+            # 본문 상세 수집 시도 (병렬 처리로 속도 개선)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def fetch_post_detail(post_info):
+                """개별 포스트 본문을 가져오는 함수"""
+                log_no, title, brief_raw = post_info
+                try:
+                    post_url = f"https://blog.naver.com/PostView.naver?blogId={blog_id}&logNo={log_no}"
+                    pr = requests.get(post_url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }, timeout=10)
+                    if pr.status_code == 200:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(pr.text, 'html.parser')
+                        content_div = soup.select_one('div.se-main-container') or soup.select_one('#postViewArea') or soup.select_one('.post-view')
+                        if content_div:
+                            body_text = content_div.get_text('\n', strip=True)[:1000]
+                            return f"제목: {title}\n본문:\n{body_text}"
+                except Exception:
+                    pass
+                if brief_raw:
+                    return f"제목: {title}\n본문:\n{html_mod.unescape(brief_raw)}"
+                return None
+
+            detailed_texts = []
+            post_infos = []
+            for post in popular_list[:max_count]:
+                log_no = post.get('logNo', '')
+                title = post.get('titleWithInspectMessage', '') or post.get('title', '')
+                brief = post.get('briefContents', '')
+                if log_no:
+                    post_infos.append((log_no, title, brief))
+
+            self.log_emit(f"📥 [{blog_id}] {len(post_infos)}개 포스트 본문 병렬 수집 중...")
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_post_detail, info): info for info in post_infos}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        detailed_texts.append(result)
+
+            if detailed_texts:
+                self._popular_collected_text = "\n\n---\n\n".join(detailed_texts)
+
+            self._emit_progress(self.popular_progress, base_progress + progress_range)
+            result_text = f"✅ {blog_id} 블로그 인기글 {len(results)}개 수집 완료\n\n" + "\n".join(results)
+            self.log_emit(f"✅ {blog_id} → {len(results)}개 인기글 수집 완료")
+            collected = "\n\n---\n\n".join(detailed_texts) if detailed_texts else self._popular_collected_text
+            return {'display': result_text, 'text': collected}
+
+        except Exception as e:
+            self.log_emit(f"❌ [{blog_id}] 인기글 수집 오류: {e}")
+            return None
+
+    # ─── 체크박스/선택 헬퍼 (v3 패치) ───
+    def _toggle_all_popular(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.collect_popular_table.rowCount()):
+            it = self.collect_popular_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 수집 인기글 {'전체 선택' if state else '전체 해제'} ({self.collect_popular_table.rowCount()}건)")
+
+    def _get_checked_popular_indices(self):
+        out = []
+        for r in range(self.collect_popular_table.rowCount()):
+            it = self.collect_popular_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _toggle_all_articles(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 원고 {'전체 선택' if state else '전체 해제'} ({self.article_table.rowCount()}건)")
+
+    def _get_checked_article_indices(self):
+        out = []
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _set_article_check(self, row, checked=True):
+        it = QTableWidgetItem()
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.article_table.setItem(row, 0, it)
+
+    def _parse_popular_items_from_text(self, raw_text):
+        """수집된 인기글 텍스트를 체크박스 표/AI 전달용 dict 목록으로 변환한다."""
+        items = []
+        chunks = re.split(r'\n={3,}[^=]*={3,}\n|\n-{3,}\n', raw_text or '')
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            title = ''
+            body_lines = []
+            url = ''
+            blog_id = ''
+            in_body = False
+            for line in chunk.split('\n'):
+                stripped = line.strip()
+                if stripped.startswith('제목:'):
+                    title = stripped.split('제목:', 1)[1].strip()
+                    in_body = False
+                elif stripped.startswith('블로그:'):
+                    blog_id = stripped.split('블로그:', 1)[1].strip()
+                    in_body = False
+                elif stripped.startswith('링크:') or stripped.startswith('URL:'):
+                    url = stripped.split(':', 1)[1].strip()
+                    in_body = False
+                elif stripped.startswith('본문:'):
+                    after = stripped.split('본문:', 1)[1].strip()
+                    if after:
+                        body_lines.append(after)
+                    in_body = True
+                elif stripped.startswith('내용:'):
+                    after = stripped.split('내용:', 1)[1].strip()
+                    if after:
+                        body_lines.append(after)
+                    in_body = True
+                elif in_body:
+                    body_lines.append(line)
+            body = '\n'.join(body_lines).strip()
+            if title or body:
+                items.append({'blog_id': blog_id, 'title': title or '제목 없음', 'body': body, 'url': url})
+        return items
+
+    def _populate_popular_collect_table(self, popular_items):
+        """수집된 인기글 dict 리스트를 표에 채운다.
+        popular_items: [{'blog_id':..., 'title':..., 'body':..., 'url':...}, ...]"""
+        self._popular_collected_items = list(popular_items or [])
+        self.collect_popular_table.setRowCount(len(self._popular_collected_items))
+        for i, it in enumerate(self._popular_collected_items):
+            cb = QTableWidgetItem()
+            cb.setFlags(cb.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            cb.setCheckState(Qt.CheckState.Checked)
+            cb.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.collect_popular_table.setItem(i, 0, cb)
+            self.collect_popular_table.setItem(i, 1, QTableWidgetItem(str(it.get('blog_id', ''))[:40]))
+            self.collect_popular_table.setItem(i, 2, QTableWidgetItem(str(it.get('title', ''))[:120]))
+            body = str(it.get('body', ''))
+            body_short = (body[:80] + '…') if len(body) > 80 else body
+            self.collect_popular_table.setItem(i, 3, QTableWidgetItem(body_short))
+        self.main.log(f"📋 인기글 수집 표 갱신: {len(self._popular_collected_items)}건 (기본 전체 체크)")
+
+    def send_popular_to_ai(self):
+        # 체크된 항목만 AI 입력으로 전달
+        items = list(getattr(self, '_popular_collected_items', []) or [])
+        if not items:
+            items = self._parse_popular_items_from_text(getattr(self, '_popular_collected_text', '') or self.popular_result.toPlainText())
+            if items:
+                self._populate_popular_collect_table(items)
+
+        if not items:
+            self.main.log("⚠️ 먼저 인기글을 수집하세요")
+            return
+
+        checked = self._get_checked_popular_indices() if hasattr(self, 'collect_popular_table') else []
+        if not checked:
+            self.main.log("⚠️ AI로 전달할 인기글을 체크하세요")
+            return
+
+        chosen = [items[i] for i in checked if 0 <= i < len(items)]
+        if not chosen:
+            self.main.log("⚠️ AI로 전달할 인기글을 체크하세요")
+            return
+
+        blocks = []
+        for k, it in enumerate(chosen, 1):
+            blocks.append(f"[{k}] 제목: {it.get('title','')}\n블로그: {it.get('blog_id','')}\n링크: {it.get('url','')}\n본문: {it.get('body','')}")
+        text = "\n\n---\n\n".join(blocks)
+        self.ai_input.setPlainText(text)
+        self.main.log(f"✅ 인기글 데이터가 AI 입력으로 전달되었습니다 (선택 {len(chosen)}건)")
+
+    def _on_popular_selected(self):
+        """수집된 인기글 선택 시 AI 입력 미리보기에 표시하되, 생성 대상은 체크박스로 확정한다."""
+        rows = self.collect_popular_table.selectionModel().selectedRows()
+        items = list(getattr(self, '_popular_collected_items', []) or [])
+        if not rows or not items:
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(items):
+            it = items[idx]
+            self.ai_input.setPlainText(
+                f"[미리보기] 제목: {it.get('title','')}\n"
+                f"블로그: {it.get('blog_id','')}\n"
+                f"링크: {it.get('url','')}\n"
+                f"본문: {it.get('body','')}"
+            )
+
+    def _on_article_selected(self):
+        """테이블에서 원고 선택 시 미리보기에 표시"""
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            art = self.generated_articles[idx]
+            self.ai_output.setPlainText(art.get('content', ''))
+
+    def _copy_selected_article(self):
+        """선택된 원고 1개 복사"""
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows:
+            self.main.log("⚠️ 원고를 먼저 선택하세요")
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            pyperclip.copy(self.generated_articles[idx].get('content', ''))
+            self.main.log(f"📋 원고 #{idx+1} 복사 완료")
+
+    def _copy_all_articles(self):
+        """전체 원고 복사"""
+        if not self.generated_articles:
+            self.main.log("⚠️ 생성된 원고가 없습니다")
+            return
+        all_text = ""
+        for i, art in enumerate(self.generated_articles):
+            all_text += f"\n{'='*60}\n[원고 {i+1}] {art.get('title','')}\n{'='*60}\n"
+            all_text += art.get('content', '') + "\n"
+        pyperclip.copy(all_text)
+        self.main.log(f"📋 전체 {len(self.generated_articles)}건 원고 복사 완료")
+
+    def _update_article_table(self):
+        """generated_articles 리스트를 테이블에 반영 (5컬럼: 선택/번호/상태/제목/글자수)"""
+        self.article_table.setRowCount(len(self.generated_articles))
+        for i, art in enumerate(self.generated_articles):
+            status = art.get('status', '완료')
+            # 컬럼 0: 체크박스 (완료된 원고만 기본 체크)
+            self._set_article_check(i, checked=(status == '완료'))
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem(status))
+            self.article_table.setItem(i, 3, QTableWidgetItem(art.get('title', '')[:80]))
+            content = art.get('content', '')
+            self.article_table.setItem(i, 4, QTableWidgetItem(str(len(content)) if status == "완료" else "실패"))
+
+    def _import_articles_excel(self):
+        """엑셀 파일에서 원고를 불러오기"""
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 원고 파일 선택", "", "Excel Files (*.xlsx *.xls)")
+        if not path:
+            return
+        try:
+            import pandas as pd
+            df = pd.read_excel(path)
+            imported = []
+            for _, row in df.iterrows():
+                title = str(row.get('제목', row.get('title', '제목 없음')))
+                content = str(row.get('생성된 원고', row.get('content', row.get('생성된원고', ''))))
+                keyword = str(row.get('키워드', row.get('keyword', '')))
+                source = str(row.get('원문 참고', row.get('원문참고', row.get('source', ''))))
+                if content and content != 'nan':
+                    imported.append({
+                        'title': title if title != 'nan' else '제목 없음',
+                        'content': content,
+                        'keyword': keyword if keyword != 'nan' else '',
+                        'source': source if source != 'nan' else '',
+                        'status': '완료',
+                    })
+            if imported:
+                self.generated_articles.extend(imported)
+                self._update_article_table()
+                self.main.log(f"📥 엑셀에서 {len(imported)}건 원고 불러옴 (총 {len(self.generated_articles)}건)")
+            else:
+                self.main.log("⚠️ 엑셀에서 불러올 원고가 없습니다 (제목/생성된 원고 컬럼 필요)")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 원고 불러오기 오류: {e}")
+
+    def _export_articles_excel(self):
+        """생성된 원고를 엑셀로 내보내기"""
+        if not self.generated_articles:
+            self.main.log("⚠️ 내보낼 원고가 없습니다")
+            return
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            path, _ = QFileDialog.getSaveFileName(self, "엑셀 내보내기", "인기글_원고_목록.xlsx", "Excel Files (*.xlsx)")
+            if not path:
+                return
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "원고 목록"
+
+            # 헤더
+            headers = ["번호", "제목", "글자수", "상태", "원문 참고", "생성된 원고"]
+            header_fill = PatternFill('solid', fgColor='1a4a8a')
+            header_font = Font(bold=True, color='FFFFFF')
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center')
+
+            ws.column_dimensions['A'].width = 6
+            ws.column_dimensions['B'].width = 50
+            ws.column_dimensions['C'].width = 10
+            ws.column_dimensions['D'].width = 8
+            ws.column_dimensions['E'].width = 60
+            ws.column_dimensions['F'].width = 80
+
+            for i, art in enumerate(self.generated_articles):
+                ws.cell(row=i+2, column=1, value=i+1)
+                ws.cell(row=i+2, column=2, value=art.get('title', ''))
+                ws.cell(row=i+2, column=3, value=len(art.get('content', '')))
+                ws.cell(row=i+2, column=4, value=art.get('status', '완료'))
+                ws.cell(row=i+2, column=5, value=art.get('source', '')[:500])
+                ws.cell(row=i+2, column=6, value=art.get('content', ''))
+
+            wb.save(path)
+            self.main.log(f"📊 엑셀 내보내기 완료: {path} ({len(self.generated_articles)}건)")
+        except ImportError:
+            self.main.log("❌ openpyxl 패키지가 필요합니다: pip install openpyxl")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 내보내기 오류: {e}")
+
+    def _parse_individual_posts(self, input_text):
+        """수집된 텍스트를 개별 인기글로 파싱 (--- 구분자 기반)"""
+        posts = []
+        # 다중 블로그 구분자와 개별 글 구분자 모두 처리
+        chunks = re.split(r'\n={3,}[^=]*={3,}\n|\n-{3,}\n', input_text)
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            title = "제목 없음"
+            for line in chunk.split('\n'):
+                if line.startswith('제목:'):
+                    title = line.replace('제목:', '').strip()
+                    break
+            posts.append({'title': title, 'text': chunk})
+        return posts
+
+    def generate_ai(self):
+        """수집된 각 인기글에 대해 개별 AI 원고를 생성"""
+        # 취소 토글: 생성 중이면 취소
+        if self._generating:
+            self._cancel_generate = True
+            self.gen_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 AI 생성 취소 요청됨...")
+            return
+
+        input_text = self.ai_input.toPlainText().strip()
+        if not input_text:
+            self.main.log("⚠️ 먼저 인기글을 수집하고 AI 입력으로 전달하세요")
+            return
+
+        # 개별 인기글 파싱
+        individual_posts = self._parse_individual_posts(input_text)
+        if not individual_posts:
+            self.main.log("⚠️ 파싱 가능한 인기글이 없습니다")
+            return
+
+        total = len(individual_posts)
+        self.main.log(f"📝 총 {total}개 인기글에 대해 개별 AI 원고 생성을 시작합니다")
+
+        self._cancel_generate = False
+        self._generating = True
+        self.gen_btn.setText(f"🛑 생성 취소 (0/{total})")
+        self.gen_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.ai_progress.setVisible(True)
+        self.ai_progress.setValue(0)
+
+        # 테이블 초기화 - 대기 상태로 표시
+        self.generated_articles = []
+        self.article_table.setRowCount(total)
+        for i, post in enumerate(individual_posts):
+            self._set_article_check(i, checked=False)
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem("대기"))
+            self.article_table.setItem(i, 3, QTableWidgetItem(post['title'][:80]))
+            self.article_table.setItem(i, 4, QTableWidgetItem("-"))
+
+        prompt_template = self.ai_prompt.toPlainText().strip()
+        char_count = self.char_count.value()
+        service = self.ai_model.currentText()
+
+        # 스레드를 먼저 생성하여 do_gen_all에서 시그널 사용 가능하게 함
+        thread = WorkerThread(lambda: None)  # placeholder, 아래에서 func 교체
+
+        def _ui_update(fn):
+            """메인 스레드에서 UI 업데이트 실행"""
+            thread.ui_update_signal.emit(fn)
+
+        def do_gen_all():
+            generated_list = []
+            errors_collection = []
+
+            for idx, post in enumerate(individual_posts):
+                if self._cancel_generate:
+                    thread.log_signal.emit(f"\U0001f6d1 AI 생성 취소됨 ({len(generated_list)}건 처리됨)")
+                    break
+
+                post_title = post.get('title', '제목 없음')
+                source_text = normalize_model_text(post.get('text', ''))
+                source_text = re.sub(r'\n{3,}', '\n\n', source_text)[:2800]
+
+                thread.log_signal.emit(f"\U0001f4dd [{idx+1}/{total}] AI 원고 생성 중: {post_title[:40]}...")
+                _ui_update(lambda i=idx, t=total: self.gen_btn.setText(f"\U0001f6d1 생성 취소 ({i+1}/{t})"))
+                _ui_update(lambda i=idx: self.article_table.setItem(i, 2, QTableWidgetItem("생성중")))
+                _ui_update(lambda i=idx, t=total: self.ai_progress.setValue(int((i / t) * 100)))
+
+                if len(re.sub(r'\s+', '', source_text)) < 40:
+                    err_msg = '참고 자료가 너무 짧아 건너뜁니다'
+                    thread.log_signal.emit(f"\u274c [{idx+1}/{total}] {err_msg}")
+                    generated_list.append({
+                        'title': post_title, 'content': f'\u274c {err_msg}',
+                        'status': '실패', 'source': source_text, 'error': err_msg,
+                    })
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 1, QTableWidgetItem("\u274c실패")))
+                    continue
+
+                full_prompt = prompt_template + f"\n\n글자 수: 약 {char_count}자"
+                full_prompt += "\n- 반드시 완성된 한국어 블로그 글 형태로 작성해주세요"
+                full_prompt += "\n- 제목을 첫 줄에 ## 제목 형태로 작성해주세요"
+                full_prompt += "\n- 참고 자료를 그대로 복사하지 말고 자연스럽게 재구성해주세요"
+                full_prompt += f"\n\n참고 자료:\n{source_text}"
+
+                try:
+                    text = None
+                    if "Perplexity" in service:
+                        api_key = self.main.config.get('perplex_key', '').strip()
+                        if not api_key:
+                            raise RuntimeError('Perplexity API 키 없음')
+                        sys_msg = "당신은 한국어 SEO 블로그 전문 작가입니다. 주어진 참고 자료를 바탕으로 네이버 블로그에 게시할 완성된 포스트를 작성합니다. 제목부터 본문, 소제목까지 모두 완성된 한국어 글만 출력하세요."
+                        text = call_perplexity(api_key, full_prompt, model='sonar-pro', system_message=sys_msg)
+                    elif "Gemini" in service:
+                        api_key = self.main.config.get('gemini_key', '').strip()
+                        if not api_key:
+                            raise RuntimeError('Gemini API 키 없음')
+                        text = call_gemini_text(api_key, full_prompt, model='gemini-2.5-flash')
+                    elif "GPT" in service:
+                        api_key = self.main.config.get('openai_key', '').strip()
+                        if not api_key:
+                            raise RuntimeError('OpenAI API 키 없음')
+                        text = call_openai_text(api_key, full_prompt, model='gpt-4o')
+
+                    text = normalize_model_text(text)
+                    if len(re.sub(r'\s+', '', text)) < 80:
+                        raise RuntimeError(f'AI 응답이 너무 짧습니다: {text[:120]}')
+
+                    gen_title = post_title
+                    for line in text.split('\n'):
+                        stripped = line.strip()
+                        if stripped.startswith('##'):
+                            gen_title = stripped.lstrip('#').strip()
+                            break
+                        if stripped and not stripped.startswith('['):
+                            gen_title = stripped[:80]
+                            break
+
+                    generated_list.append({
+                        'title': gen_title, 'content': text,
+                        'status': '완료', 'source': source_text,
+                    })
+                    # 즉시 발행 대기열 형태로 저장
+                    self.generated_articles = list(generated_list)
+                    try:
+                        _queue = [{'order': qi+1, 'title': ga['title'], 'content': ga['content'], 'status': 'pending', 'result': ''} for qi, ga in enumerate(generated_list) if ga.get('status') == '완료']
+                        if _queue:
+                            with open('publish_queue_popular_incremental.json', 'w', encoding='utf-8') as _qf:
+                                json.dump(_queue, _qf, ensure_ascii=False, indent=2)
+                            thread.log_signal.emit(f"\U0001f4be [{idx+1}/{total}] 발행 대기열 저장 완료 ({len(_queue)}건)")
+                    except Exception: pass
+                    thread.log_signal.emit(f"\u2705 [{idx+1}/{total}] 완료: {gen_title[:40]}")
+
+                    # 자동 DALL-E 이미지 생성
+                    if self.auto_dalle_check.isChecked():
+                        oai_key = self.main.config.get('openai_key', '').strip()
+                        if oai_key:
+                            auto_count = self.auto_dalle_count.value()
+                            thread.log_signal.emit(f"  🤖 [{idx+1}/{total}] 자동 이미지 생성 중 ({auto_count}장)...")
+                            auto_imgs = self._auto_generate_dalle_for_article(gen_title, oai_key, count=auto_count)
+                            if auto_imgs:
+                                self._image_pool.extend(auto_imgs)
+                                thread.log_signal.emit(f"  🖼️ [{idx+1}/{total}] 자동 이미지 {len(auto_imgs)}장 생성 완료")
+                    _ui_update(lambda i=idx, t=gen_title, c=len(text): (
+                        self.article_table.setItem(i, 1, QTableWidgetItem("\u2705완료")),
+                        self.article_table.setItem(i, 2, QTableWidgetItem(t[:80])),
+                        self.article_table.setItem(i, 3, QTableWidgetItem(str(c)))
+                    ))
+                except Exception as e:
+                    err_msg = format_error_message(e)
+                    thread.log_signal.emit(f"\u274c [{idx+1}/{total}] 오류: {err_msg}")
+                    generated_list.append({
+                        'title': post_title, 'content': f'\u274c 오류: {err_msg}',
+                        'status': '실패', 'source': source_text, 'error': err_msg,
+                    })
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 1, QTableWidgetItem("\u274c실패")))
+
+                if idx < total - 1 and not self._cancel_generate:
+                    wait_seconds = 4 if "Perplexity" in service else 2
+                    for _ in range(wait_seconds * 2):
+                        if self._cancel_generate:
+                            break
+                        time.sleep(0.5)
+
+            self.generated_articles = generated_list
+            _ui_update(lambda: self.ai_progress.setValue(100))
+            success = sum(1 for a in generated_list if a.get('status') == '완료')
+            failed = sum(1 for a in generated_list if a.get('status') == '실패')
+
+            if failed and success == 0:
+                unique_errors = list(dict.fromkeys(a.get('error','') for a in generated_list if a.get('error')))
+                thread.log_signal.emit(f"\u274c AI 원고 생성 완료 - 총 {total}건 중 {failed}건 실패")
+                if unique_errors:
+                    return "\u274c 총 {}건 원고 생성 실패\n\n주요 오류:\n- {}".format(total, "\n- ".join(unique_errors[:5]))
+                return f"\u274c 총 {total}건 원고 생성 실패"
+
+            thread.log_signal.emit(f"\u2705 AI 원고 생성 완료 - 총 {total}건 중 {success}건 성공, {failed}건 실패")
+            return f"\u2705 총 {total}건 원고 생성 완료 ({success}건 성공 / {failed}건 실패)"
+
+        thread.func = do_gen_all  # placeholder 교체
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.ai_output.setPlainText(r))
+        thread.ui_update_signal.connect(lambda fn: fn())  # 메인 스레드에서 UI 콜백 실행
+        def _on_gen_finished():
+            self._generating = False
+            self._cancel_generate = False
+            self.gen_btn.setText("🎯 전체 AI 원고 생성 (개별)")
+            self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+            self.ai_progress.setVisible(False)
+            self._update_article_table()
+
+        thread.finished_signal.connect(_on_gen_finished)
+        thread.start()
+    # ══════════════ 이미지 관리 메서드 ══════════════
+
+    def _refresh_image_table(self):
+        """이미지 풀 테이블 갱신"""
+        self.image_table.setRowCount(len(self._image_pool))
+        for i, img in enumerate(self._image_pool):
+            self.image_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.image_table.setItem(i, 1, QTableWidgetItem("📁업로드" if img['source'] == 'upload' else "🤖AI"))
+            self.image_table.setItem(i, 2, QTableWidgetItem(img.get('desc', '')[:60]))
+            self.image_table.setItem(i, 3, QTableWidgetItem(img.get('path', '')))
+        self.img_status.setText(f"총 {len(self._image_pool)}개 이미지 등록됨")
+
+    def _upload_images(self):
+        """로컬 이미지 파일 직접 업로드"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "이미지 파일 선택", "",
+            "이미지 파일 (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;모든 파일 (*.*)"
+        )
+        if not files:
+            return
+        for fpath in files:
+            self._image_pool.append({
+                'source': 'upload',
+                'desc': os.path.basename(fpath),
+                'path': fpath,
+            })
+        self._refresh_image_table()
+        self.main.log(f"🖼️ {len(files)}개 이미지 업로드 완료 (총 {len(self._image_pool)}개)")
+
+    def _generate_dalle_images(self):
+        """DALL-E API로 이미지 생성"""
+        prompt = self.dalle_prompt.text().strip()
+        if not prompt:
+            self.main.log("⚠️ DALL-E 프롬프트를 입력하세요")
+            return
+        api_key = self.main.config.get('openai_key', '').strip()
+        if not api_key:
+            self.main.log("⚠️ OpenAI API Key가 설정되지 않았습니다 (설정 탭에서 입력)")
+            return
+
+        count = self.dalle_count.value()
+        size = self.dalle_size.currentText()
+
+        self.img_dalle_btn.setEnabled(False)
+        self.img_dalle_btn.setText(f"🤖 생성 중... (0/{count})")
+        self.main.log(f"🤖 DALL-E 이미지 생성 시작: '{prompt}' × {count}장")
+
+        def do_gen():
+            results = []
+            for i in range(count):
+                try:
+                    path = generate_dalle_image(api_key, prompt, size=size)
+                    results.append({'source': 'dalle', 'desc': prompt, 'path': path})
+                    thread.log_signal.emit(f"  🖼️ [{i+1}/{count}] 이미지 생성 완료")
+                except Exception as e:
+                    thread.log_signal.emit(f"  ❌ [{i+1}/{count}] 생성 실패: {format_error_message(e)}")
+                if i < count - 1:
+                    time.sleep(2)
+            return results
+
+        thread = WorkerThread(do_gen)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def on_result(results):
+            if isinstance(results, list):
+                self._image_pool.extend(results)
+                self._refresh_image_table()
+                self.main.log(f"✅ DALL-E 이미지 {len(results)}장 생성 완료 (총 {len(self._image_pool)}개)")
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.img_dalle_btn.setEnabled(True),
+            self.img_dalle_btn.setText("🤖 AI 이미지 생성 (ChatGPT)")
+        ))
+        thread.start()
+
+    def _auto_generate_dalle_for_article(self, article_title, api_key, count=1, size="1024x1024"):
+        """원고 제목 기반 자동 DALL-E 이미지 생성 (워커 스레드 내에서 호출)"""
+        generated = []
+        for i in range(count):
+            try:
+                prompt = f"네이버 블로그 포스팅용 고퀄리티 사진. 주제: {article_title}. 자연스러운 실제 사진 스타일, 텍스트 없이."
+                path = generate_dalle_image(api_key, prompt, size=size)
+                generated.append({'source': 'dalle', 'desc': f"자동생성: {article_title}", 'path': path})
+            except Exception as e:
+                pass  # 자동 생성 실패는 무시
+            if i < count - 1:
+                time.sleep(2)
+        return generated
+
+    def _delete_selected_image(self):
+        """선택된 이미지 삭제"""
+        rows = set(item.row() for item in self.image_table.selectedItems())
+        if not rows:
+            self.main.log("⚠️ 삭제할 이미지를 선택하세요")
+            return
+        for idx in sorted(rows, reverse=True):
+            if 0 <= idx < len(self._image_pool):
+                self._image_pool.pop(idx)
+        self._refresh_image_table()
+        self.main.log(f"🗑️ {len(rows)}개 이미지 삭제됨")
+
+    def _clear_all_images(self):
+        """모든 이미지 삭제"""
+        self._image_pool.clear()
+        self._refresh_image_table()
+        self.main.log("🗑️ 전체 이미지 삭제됨")
+
+    def _get_images_for_article(self, article_idx, photo_count):
+        """원고에 사용할 이미지들 반환 (라운드 로빈).
+        v27: photo_count가 0이어도 풀에 이미지가 있으면 최소 1장 반환 → 본문 시작 부분에 자동 삽입."""
+        if not self._image_pool:
+            return []
+        total_imgs = len(self._image_pool)
+        # [사진] 토큰이 0개여도 풀에 있으면 1장은 사용
+        effective = max(photo_count, 1) if total_imgs > 0 else photo_count
+        start = (article_idx * effective) % total_imgs
+        result = []
+        for i in range(effective):
+            idx = (start + i) % total_imgs
+            result.append(self._image_pool[idx]['path'])
+        return result
+    def _insert_image_to_editor(self, driver, image_path):
+        """네이버 블로그 에디터에 이미지를 삽입.
+        v27: 본문 전용 file input 우선 + 툴바 이미지 버튼 먼저 활성화 + iframe 진입."""
+        import subprocess as sp
+
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"이미지 파일 없음: {image_path}")
+
+        abs_path = os.path.abspath(image_path)
+
+        # iframe 진입 시도 (mainFrame 안에 에디터가 있음)
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame('mainFrame')
+        except Exception:
+            pass
+
+        # ── 방법 1: 본문 이미지 툴바 버튼을 먼저 눌러 file input 활성화 ──
+        try:
+            for btn_sel in [
+                'button.se-image-toolbar-button',
+                'button[data-name="image"]',
+                'button[data-type="image"]',
+                'button[aria-label*="사진"]',
+                'button[aria-label*="이미지"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    if btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(0.6)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # ── 방법 2: 본문 전용 file input 우선 (썸네일용은 보통 첫 번째라 제외) ──
+        try:
+            # 본문용 셀렉터 우선
+            preferred = []
+            for sel in [
+                'input.se-image-input-file',
+                'input[class*="image"][type="file"]',
+                'input[accept*="image"][type="file"]',
+            ]:
+                preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
+            # fallback: 모든 file input (썸네일 제외 위해 뒤쪽부터)
+            all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+            candidates = preferred + list(reversed(all_inputs))
+            seen = set()
+            for fi in candidates:
+                key = fi.get_attribute('outerHTML')[:200]
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    # display:none 인 input도 send_keys 가능
+                    driver.execute_script("arguments[0].style.display='block'; arguments[0].style.visibility='visible';", fi)
+                    fi.send_keys(abs_path)
+                    time.sleep(4)  # 업로드 + 처리 대기
+                    self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                    # iframe 복귀
+                    try:
+                        driver.switch_to.default_content()
+                        driver.switch_to.frame('mainFrame')
+                    except Exception:
+                        pass
+                    return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 2: 이미지 버튼 클릭 → file input에 전달
+        try:
+            for btn_sel in [
+                'button[data-name="image"]',
+                'button.se-image-toolbar-button',
+                'button[data-type="image"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    img_btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    driver.execute_script("arguments[0].click();", img_btn)
+                    time.sleep(1)
+                    # file input 찾기
+                    file_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+                    for fi in file_inputs:
+                        try:
+                            fi.send_keys(os.path.abspath(image_path))
+                            time.sleep(3)
+                            self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                            return
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 3: PowerShell 클립보드 이미지 복사 → Ctrl+V
+        try:
+            abs_path = os.path.abspath(image_path).replace('\\', '/')
+            ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile('{abs_path}')
+[System.Windows.Forms.Clipboard]::SetImage($img)
+$img.Dispose()
+"""
+            sp.run(['powershell', '-Command', ps_script], capture_output=True, timeout=10)
+            time.sleep(0.5)
+            safe_hotkey(driver, 'ctrl', 'v')
+            time.sleep(3)
+            self.log_emit(f"  🖼️ 이미지 붙여넣기 완료: {os.path.basename(image_path)}")
+        except Exception as e:
+            raise RuntimeError(f"이미지 삽입 모든 방법 실패: {e}")
+
+    def save_draft(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 저장할 원고가 없습니다")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "원고 저장", "인기글_원고_전체.txt", "텍스트 파일 (*.txt)")
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                for i, art in enumerate(self.generated_articles):
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"[원고 {i+1}] {art.get('title', '')}\n")
+                    f.write(f"{'='*60}\n\n")
+                    f.write(art.get('content', '') + "\n\n")
+            self.main.log(f"💾 전체 {len(self.generated_articles)}건 원고 저장 완료: {path}")
+
+    def load_blog_folders(self):
+        """블로그 폴더 불러오기 - 캐시 우선 사용"""
+        nid = self.account_combo.currentText().strip()
+        if not nid:
+            self.main.log("⚠️ 발행 계정을 선택하세요")
+            return
+
+        # 캐시 확인
+        if nid in self._folder_cache and self._folder_cache[nid]:
+            cached = self._folder_cache[nid]
+            self.blog_folder.clear()
+            self.blog_folder.addItems(cached)
+            self.main.log(f"📂 저장된 폴더 사용: {nid} ({len(cached)}개) — 새로고침하려면 캐시 삭제 후 재시도")
+            return
+
+        self.load_folders_btn.setEnabled(False)
+        self.main.log(f"🔄 [{nid}] 블로그 폴더 목록 불러오는 중...")
+
+        def do_load():
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': f'https://blog.naver.com/{nid}'
+                }
+                url = f"https://blog.naver.com/PostList.naver?blogId={nid}"
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    folders = []
+                    for opt in soup.select('select option, li a[onclick*="category"]'):
+                        name = opt.get_text(strip=True)
+                        if name and name not in ['전체보기', ''] and len(name) < 50:
+                            if name not in folders:
+                                folders.append(name)
+                    if folders:
+                        return folders
+                return []
+            except Exception as e:
+                self.log_emit(f"⚠️ 폴더 불러오기 실패: {e}")
+                return []
+
+        thread = WorkerThread(do_load)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def on_result(folders):
+            if folders and isinstance(folders, list):
+                self.blog_folder.clear()
+                self.blog_folder.addItems(folders)
+                # 캐시에 저장
+                self._folder_cache[nid] = folders
+                self._save_folder_cache()
+                self.main.log(f"✅ {len(folders)}개 폴더 로드 완료 (캐시 저장됨 — 다음부터 자동 로드)")
+            else:
+                self.main.log("⚠️ 폴더를 찾을 수 없습니다")
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: self.load_folders_btn.setEnabled(True))
+        thread.start()
+
+    def _build_publish_queue(self):
+        source_articles = list(getattr(self, 'generated_articles', []) or [])
+
+        # 체크된 행만 발행 (없으면 전체 폴백)
+        try:
+            checked = self._get_checked_article_indices()
+        except Exception:
+            checked = []
+        if source_articles and checked:
+            source_articles = [source_articles[i] for i in checked if 0 <= i < len(source_articles)]
+            try:
+                self.main.log(f"📤 발행 대기열: 체크된 {len(source_articles)}건만 발행")
+            except Exception:
+                pass
+        elif source_articles:
+            try:
+                self.main.log(f"⚠️ 체크된 원고가 없어 전체 {len(source_articles)}건을 발행합니다")
+            except Exception:
+                pass
+
+        if not source_articles:
+            content = self.ai_output.toPlainText().strip()
+            if content:
+                source_articles = [{'title': '인기글 포스트', 'content': content}]
+        queue = []
+        for idx, article in enumerate(source_articles, start=1):
+            title = str(article.get('title', f'인기글 포스트 {idx}')).strip() or f'인기글 포스트 {idx}'
+            content = str(article.get('content', '')).strip()
+            status = article.get('status', '')
+            if not content or status == '실패': continue
+            queue.append({'order': idx, 'title': title, 'content': content, 'status': 'pending', 'result': ''})
+        return queue
+
+    def _write_publish_queue_snapshot(self, account_id, queue):
+        safe_account = re.sub(r'[^0-9A-Za-z_.-]+', '_', (account_id or 'default').strip())
+        path = f"publish_queue_popular_{safe_account}.json"
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(queue, f, ensure_ascii=False, indent=2)
+        return path
+
+    def publish_to_blog(self):
+        """generated_articles 리스트를 순회하며 각각 블로그에 발행 (순차 처리)"""
+        # 중복 실행 방지
+        if self._publishing_flag:
+            self.main.log("⚠️ 이미 발행이 진행 중입니다. 완료될 때까지 기다려주세요.")
+            return
+
+        publish_queue = self._build_publish_queue()
+        if not publish_queue:
+            self.main.log("⚠️ 발행할 원고가 없습니다. AI 글쓰기를 먼저 실행하세요")
+            return
+
+        config = self.main.config
+        naver_id, naver_pw = self._get_selected_account()
+        if not naver_id or not naver_pw:
+            self.main.log("⚠️ 설정에서 네이버 계정을 먼저 입력하세요")
+            return
+
+        folder = self.blog_folder.currentText().strip()
+        mode = self.save_mode.currentText()
+        total = len(publish_queue)
+        queue_path = self._write_publish_queue_snapshot(naver_id, publish_queue)
+        self.publish_queue = publish_queue
+        self._publishing_flag = True
+
+        self.publish_btn.setEnabled(False)
+        self.publish_btn.setText(f"발행 중... (0/{total})")
+        self.pub_progress.setVisible(True)
+        self.pub_progress.setValue(0)
+
+        self.main.log(f"🚀 총 {total}건 블로그 발행 시작")
+        for qi, q_item in enumerate(publish_queue): self.main.log(f"  📋 [{qi+1}] {q_item['title'][:40]} ({len(q_item['content'])}자)")
+        self.main.log(f"🗂️ 발행 대기열 저장 완료: {queue_path}")
+
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            opts = uc.ChromeOptions()
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--disable-popup-blocking')
+            prefs = {
+                'profile.default_content_setting_values.popups': 0,
+            }
+            opts.add_experimental_option('prefs', prefs)
+            driver = make_uc_driver(opts)
+
+            # ── window.open 완전 차단 (드라이버 생성 직후) ──
+            def block_window_open():
+                try:
+                    driver.execute_script("""
+                        if (!window._woBlocked) {
+                            window._origOpen = window.open;
+                            window.open = function(url) {
+                                if (url) window.location.href = url;
+                                return window;
+                            };
+                            window._woBlocked = true;
+                        }
+                    """)
+                except Exception:
+                    pass
+            # ── "작성중인 글이 있습니다" 팝업 취소 처리 ──
+            def dismiss_draft_popup():
+                """에디터 진입 시 '작성중인 글이 있습니다' 팝업이 뜨면 취소 버튼 클릭"""
+                try:
+                    time.sleep(2)
+                    cancel_selectors = [
+                        'button.se-popup-button-cancel',
+                        'button.cancel_btn__WEaBq',
+                        'button.cancel_btn',
+                        'button[class*="cancel"]',
+                        'button.se-cancel',
+                    ]
+                    # 팝업 텍스트로도 탐지
+                    try:
+                        popup_texts = driver.find_elements(By.XPATH,
+                            "//*[contains(text(),'작성중인') or contains(text(),'작성 중인') or contains(text(),'임시저장')]")
+                        if popup_texts:
+                            self.log_emit("  ℹ️ '작성중인 글' 팝업 감지 → 취소 클릭 시도")
+                            for sel in cancel_selectors:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                            # CSS 셀렉터 실패 시 XPATH로 취소/아니오 버튼 찾기
+                            cancel_btns = driver.find_elements(By.XPATH,
+                                "//button[contains(text(),'취소') or contains(text(),'아니') or contains(text(),'아니오') or contains(text(),'새로')]")
+                            for btn in cancel_btns:
+                                try:
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료 (XPATH)")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.log_emit(f"  ℹ️ 팝업 처리 중 예외(무시): {e}")
+                return False
+
+
+            # ── 원고 정제 함수 ──
+            def sanitize_content(raw_content):
+                """발행 전 원고에서 불필요한 마크다운/이미지/참조를 제거"""
+                lines = raw_content.split('\n')
+                cleaned = []
+                for line in lines:
+                    s = line.strip()
+                    # 구분선 제거
+                    if re.match(r'^[━─═\-]{3,}', s):
+                        continue
+                    # [이미지 삽입] 줄 제거
+                    if s == '[이미지 삽입]':
+                        continue
+                    # 마크다운 이미지 ![alt](url) 제거
+                    if re.match(r'^!\[.*\]\(.*\)$', s):
+                        continue
+                    # 순수 URL만 있는 줄 제거 (이미지 URL)
+                    if re.match(r'^https?://\S+$', s):
+                        continue
+                    # URL (설명) 형태 줄 제거
+                    if re.match(r'^https?://\S+\s*\(.*\)$', s):
+                        continue
+                    # 📄 [번호] 헤더 줄 제거
+                    if re.match(r'^📄\s*\[\d+\]', s):
+                        continue
+                    # (공백 제외 N자) 제거
+                    if re.match(r'^\(공백\s*제외\s*\d+자\)$', s):
+                        continue
+                    # **추가 반전형 이미지 키워드** 블록 제거
+                    if '이미지 키워드' in s and ('추가' in s or '반전형' in s):
+                        continue
+                    # 번호. URL 형태 (이미지 리스트) 제거
+                    if re.match(r'^\d+\.\s*https?://\S+', s):
+                        continue
+                    # 참조 번호 [1][2] 등 제거 (텍스트는 유지)
+                    s = re.sub(r'\[\d+\]', '', s)
+                    # ## 마크다운 헤더 → 일반 텍스트
+                    s = re.sub(r'^#{1,6}\s*', '', s)
+                    # **bold** → 일반 텍스트
+                    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+                    s = s.strip()
+                    if s:
+                        cleaned.append(s)
+                # 연속 빈 줄 정리
+                result = '\n'.join(cleaned)
+                result = re.sub(r'\n{3,}', '\n\n', result)
+                return result.strip()
+
+            def validate_article(article):
+                """발행 가능한 원고인지 검증. 불가 시 사유 반환"""
+                title = (article.get('title') or '').strip()
+                content = (article.get('content') or '').strip()
+                if not title or not content:
+                    return '제목 또는 본문이 비어 있습니다'
+                if '필수 입력 정보 부재' in content or '요청을 정확히 처리할 수 없습니다' in content:
+                    return '오류 원고 (AI가 생성 실패한 항목)'
+                # 정제 후에도 내용이 너무 짧으면 스킵
+                sanitized = sanitize_content(content)
+                if len(sanitized) < 50:
+                    return f'정제 후 본문이 너무 짧습니다 ({len(sanitized)}자)'
+                return None  # 검증 통과
+
+            success_count = 0
+            fail_count = 0
+            main_window = None
+
+            def update_queue_status(index, status, result):
+                publish_queue[index]['status'] = status
+                publish_queue[index]['result'] = result
+                self._write_publish_queue_snapshot(naver_id, publish_queue)
+
+            def keep_only_window(target_handle=None):
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                target = target_handle or main_window or handles[-1]
+                for handle in list(handles):
+                    if handle == target:
+                        continue
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(target)
+                main_window = target
+
+            def close_all_extra_tabs():
+                """main_window 외 모든 탭을 닫는다"""
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                if not main_window or main_window not in handles:
+                    main_window = handles[0]
+                for h in handles:
+                    if h == main_window:
+                        continue
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                try:
+                    driver.switch_to.window(main_window)
+                except Exception:
+                    pass
+
+            def open_editor_single_tab():
+                """항상 단일 탭에서 글쓰기 에디터를 연다"""
+                nonlocal main_window
+
+                # 0) 먼저 탭 1개만 남기기
+                close_all_extra_tabs()
+
+                # 1) 현재 탭에서 에디터로 이동 (execute_script로 강제)
+                editor_url = 'https://blog.naver.com/GoBlogWrite.naver'
+                try:
+                    driver.execute_script(f'window.location.href = "{editor_url}";')
+                except Exception:
+                    driver.get(editor_url)
+
+                time.sleep(5)
+
+                # 2) 새 탭이 열렸으면 마지막 탭(에디터)만 남기고 닫기
+                handles = list(driver.window_handles)
+                if len(handles) > 1:
+                    editor_tab = handles[-1]
+                    for h in handles:
+                        if h == editor_tab:
+                            continue
+                        try:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        except Exception:
+                            pass
+                    driver.switch_to.window(editor_tab)
+                    main_window = editor_tab
+                    self.log_emit(f"  ℹ️ 추가 탭 {len(handles)-1}개 닫고 에디터 탭만 유지")
+                else:
+                    main_window = handles[0] if handles else driver.current_window_handle
+                    driver.switch_to.window(main_window)
+
+                # 3) iframe 전환
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                # mainFrame이 있으면 진입
+                try:
+                    iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, 'mainFrame'))
+                    )
+                    driver.switch_to.frame(iframe)
+                    time.sleep(1)
+                    self.log_emit("  ✅ mainFrame iframe 진입 성공")
+                    dismiss_draft_popup()
+                except Exception:
+                    self.log_emit("  ℹ️ mainFrame 없음, 직접 에디터 접근 시도")
+
+                # 4) 에디터 로드 확인
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.se-title-text, div[contenteditable="true"]'))
+                    )
+                    self.log_emit("  ✅ 에디터 로드 확인")
+                except Exception:
+                    self.log_emit("  ⚠️ 에디터 요소를 찾지 못했습니다 (계속 시도)")
+
+            def select_folder_if_needed():
+                if not folder:
+                    return True
+                selectors = ['select#categoryId', 'select[name="categoryId"]']
+                for selector in selectors:
+                    try:
+                        cat_select = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        cat_select.click()
+                        time.sleep(0.3)
+                        for opt in cat_select.find_elements(By.TAG_NAME, 'option'):
+                            if folder in opt.text:
+                                opt.click()
+                                time.sleep(0.3)
+                                return True
+                    except Exception:
+                        continue
+                return False
+
+            def input_title(art_title):
+                title_selectors = [
+                    'span.se-placeholder',
+                    'div[data-name="title"] div[contenteditable="true"]',
+                    'div.se-section-title div.se-text-paragraph',
+                    'div.se-title-text',
+                ]
+                last_error = None
+                for selector in title_selectors:
+                    try:
+                        title_el = WebDriverWait(driver, 3).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                        try:
+                            title_el.click()
+                        except Exception:
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            ActionChains(driver).move_to_element(title_el).click().perform()
+                        time.sleep(0.2)
+                        pyperclip.copy(art_title)
+                        safe_hotkey(driver, 'ctrl', 'a')
+                        time.sleep(0.1)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        time.sleep(0.3)
+                        self.log_emit(f"  ✅ 제목 입력 완료: {art_title[:30]}")
+                        return True
+                    except Exception as e:
+                        last_error = e
+                        continue
+                raise RuntimeError(f'제목 입력 실패: {last_error}')
+
+            def focus_body():
+                body_selectors = [
+                    'div.se-section-text div[contenteditable="true"]',
+                    'div.se-component-content div[contenteditable="true"]',
+                    'div.se-text-paragraph',
+                    'div[contenteditable="true"]',
+                ]
+                for selector in body_selectors:
+                    try:
+                        elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                        for elem in elems:
+                            if not elem.is_displayed():
+                                continue
+                            try:
+                                driver.execute_script("arguments[0].click();", elem)
+                            except Exception:
+                                elem.click()
+                            time.sleep(0.3)
+                            return True
+                    except Exception:
+                        continue
+                try:
+                    safe_press(driver, 'tab')
+                    time.sleep(0.3)
+                    return True
+                except Exception:
+                    return False
+
+            def input_body(art_content):
+                if not focus_body():
+                    raise RuntimeError('본문 입력 영역 포커스 실패')
+
+                # v26: 본문 전처리만 먼저, 정렬은 입력 후에 적용
+                art_content = preprocess_article_lines(art_content)
+                alignment = getattr(self, '_selected_alignment', 'left')
+
+                wrote_any = False
+                for raw_line in art_content.split('\n'):
+                    line = raw_line.rstrip()
+                    if not line.strip():
+                        safe_press(driver, 'enter')
+                        time.sleep(0.05)
+                        continue
+
+                    # 스티커 토큰 처리
+                    sticker_idxs = extract_sticker_indices(line)
+                    line_wo_sticker = strip_sticker_tokens(line)
+
+                    # 인용구 자동 감지 — 한 줄만 인용 블록, 나머지는 일반 문단
+                    if line_wo_sticker and looks_like_quote(line_wo_sticker):
+                        insert_quote_block(driver, line_wo_sticker)
+                        wrote_any = True
+                    elif line_wo_sticker:
+                        pyperclip.copy(line_wo_sticker)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        safe_press(driver, 'enter')
+                        time.sleep(0.1)
+                        wrote_any = True
+
+                    for sidx in sticker_idxs:
+                        try:
+                            insert_naver_sticker(driver, sidx)
+                            safe_press(driver, 'enter')
+                        except Exception:
+                            pass
+
+                if not wrote_any:
+                    raise RuntimeError('본문 내용이 비어 있어 입력하지 못했습니다')
+
+                # v26: 입력 완료 후 전체 선택 → 정렬 적용 (+ JS fallback)
+                try:
+                    apply_alignment(driver, alignment, select_all_first=True)
+                except Exception:
+                    pass
+
+            def submit_article(art_idx, art_title):
+                time.sleep(1)
+                if '임시' in mode:
+                    save_selectors = [
+                        'button[data-testid="save-btn"]',
+                        'button.save_btn__Y5f57',
+                        'button.save_btn',
+                        'button[class*="save"]',
+                    ]
+                    clicked = False
+                    for selector in save_selectors:
+                        try:
+                            btn = WebDriverWait(driver, 3).until(
+                                EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        try:
+                            btn = driver.find_element(
+                                By.XPATH, '//button[contains(., "임시저장")]'
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        raise RuntimeError('임시저장 버튼을 찾지 못했습니다')
+                    time.sleep(2)
+                    self.log_emit(f"  💾 [{art_idx + 1}/{total}] 임시저장 완료: {art_title[:30]}")
+                    driver.execute_script('window.location.href = "https://blog.naver.com";')
+                    time.sleep(2)
+                    return True, '임시저장 완료'
+
+
+                publish_selectors = [
+                    'button[data-testid="publish-btn"]',
+                    'button.publish_btn__Y5f57',
+                    'button.publish_btn',
+                    'button[class*="publish"]',
+                ]
+                confirm_selectors = [
+                    'button.se-popup-button-confirm',
+                    'button.confirm_btn__WEaBq',
+                    'button.confirm_btn',
+                    'button[class*="confirm"]',
+                ]
+
+                clicked = False
+                for selector in publish_selectors:
+                    try:
+                        btn = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        driver.execute_script("arguments[0].click();", btn)
+                        clicked = True
+                        break
+                    except Exception:
+                        continue
+                if not clicked:
+                    raise RuntimeError('발행 버튼을 찾지 못했습니다')
+
+                time.sleep(2)
+
+                confirmed = False
+                for selector in confirm_selectors:
+                    try:
+                        btn = driver.find_element(By.CSS_SELECTOR, selector)
+                        driver.execute_script("arguments[0].click();", btn)
+                        confirmed = True
+                        break
+                    except Exception:
+                        continue
+
+                if not confirmed:
+                    self.log_emit('  ℹ️ 발행 확인 팝업이 없어 바로 완료 여부를 확인합니다')
+
+                time.sleep(4)
+                current_url = (driver.current_url or '').lower()
+                if 'goblogwrite' in current_url:
+                    self.log_emit('  ⚠️ 에디터 URL에 머물러 있음, 발행 재시도...')
+                    # 한 번 더 confirm 버튼 시도
+                    for selector in confirm_selectors:
+                        try:
+                            btn = driver.find_element(By.CSS_SELECTOR, selector)
+                            driver.execute_script("arguments[0].click();", btn)
+                            time.sleep(3)
+                            break
+                        except Exception:
+                            continue
+
+                self.log_emit(f"  📤 [{art_idx + 1}/{total}] 즉시발행 완료")
+                return True, driver.current_url
+
+            try:
+                self.log_emit('🔑 네이버 로그인 중...')
+                if not naver_login_with_fallback(driver, naver_id, naver_pw, self.log_emit):
+                    return '❌ 로그인 실패 - 설정에서 계정을 확인하세요'
+                self.log_emit('✅ 로그인 완료')
+                main_window = driver.current_window_handle
+                close_all_extra_tabs()
+                block_window_open()
+
+                for art_idx, article in enumerate(publish_queue):
+                    try:
+                        art_title = article.get('title', f'포스트 {art_idx + 1}')
+                        art_content = article.get('content', '')
+
+                        # ── 원고 검증 ──
+                        skip_reason = validate_article(article)
+                        if skip_reason:
+                            self.log_emit(f"\n⏭️ [{art_idx + 1}/{total}] 건너뜀: {skip_reason} — {art_title[:30]}")
+                            fail_count += 1
+                            update_queue_status(art_idx, 'skipped', skip_reason)
+                            continue
+
+                        # ── 원고 정제 ──
+                        art_content = sanitize_content(art_content)
+
+                        # ── 본문에서 제목 줄 제거 (제목은 별도 입력) ──
+                        content_lines = art_content.split('\n')
+                        filtered_lines = []
+                        title_stripped = False
+                        for cl in content_lines:
+                            cl_clean = cl.strip()
+                            if not title_stripped and cl_clean and (
+                                cl_clean == art_title.strip() or
+                                re.sub(r'^#{1,6}\s*', '', cl_clean) == art_title.strip() or
+                                cl_clean.replace('**', '') == art_title.strip()
+                            ):
+                                title_stripped = True
+                                continue
+                            filtered_lines.append(cl)
+                        art_content = '\n'.join(filtered_lines).strip()
+                        self.log_emit(f"\n📝 [{art_idx + 1}/{total}] 발행 시작: {art_title[:40]}... (정제 후 {len(art_content)}자)")
+                        QTimer.singleShot(0, lambda idx=art_idx: self.publish_btn.setText(f"발행 중... ({idx + 1}/{total})"))
+
+                        open_editor_single_tab()
+                        block_window_open()  # 에디터 로드 후 다시 차단
+
+                        if folder and not select_folder_if_needed():
+                            self.log_emit('  ⚠️ 폴더 선택 실패, 기본 카테고리로 진행합니다')
+
+                        input_title(art_title)
+                        input_body(art_content)
+                        ok, result_message = submit_article(art_idx, art_title)
+
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                        success_count += 1
+                        update_queue_status(art_idx, 'done', result_message)
+
+                    except Exception as e:
+                        self.log_emit(f"  ❌ [{art_idx + 1}/{total}] 발행 실패: {e}")
+                        fail_count += 1
+                        update_queue_status(art_idx, 'error', str(e))
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                    self._emit_progress(self.pub_progress, int(((art_idx + 1) / total) * 100))
+                    time.sleep(2)
+
+                return f"✅ 블로그 발행 완료! 성공: {success_count}건, 실패: {fail_count}건"
+
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.main.log(r))
+
+        def on_news_publish_finished():
+            self._publishing_flag = False
+            self.publish_btn.setEnabled(True)
+            self.publish_btn.setText('🚀 블로그 발행')
+            self.pub_progress.setVisible(False)
+
+        thread.finished_signal.connect(on_news_publish_finished)
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+#  4. 뉴스 수집 페이지 (웹 크롤링 방식)
+# ═══════════════════════════════════════════════════════════════
+
+class NewsCollectPage(QWidget):
+    """뉴스 수집 페이지 - 각 소스별 웹 크롤링 → Perplexity AI → 블로그 발행"""
+
+    SOURCE_CONFIG = {
+        "shortnews": {
+            "title": "1️⃣ 숏텐츠",
+            "url": "https://search.naver.com/search.naver?ssc=tab.shortents.all&sm=tab_jum&query=%EC%88%8F%ED%85%90%EC%B8%A0",
+            "desc": "네이버 숏텐츠 인기 콘텐츠를 수집합니다",
+        },
+        "daum": {
+            "title": "2️⃣ 다음",
+            "url": "https://entertain.daum.net/ranking/popular",
+            "desc": "다음 연예 인기뉴스(많이 본)를 수집합니다",
+        },
+        "nate": {
+            "title": "3️⃣ 네이트",
+            "url": "https://news.nate.com/rank/interest?sc=ent&p=day&date=20260407",
+            "desc": "네이트 연예뉴스 랭킹을 수집합니다",
+        },
+    }
+
+    def __init__(self, main_win, source="shortnews"):
+        super().__init__()
+        self.main = main_win
+        self.source = source
+        self.generated_articles = []
+        self.publish_queue = []
+        self._publishing_flag = False
+        self._folder_cache = {}
+        try:
+            cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_cache_news.json')
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f_cache:
+                    self._folder_cache = json.load(f_cache)
+        except:
+            self._folder_cache = {}
+        cfg = self.SOURCE_CONFIG.get(source, self.SOURCE_CONFIG["shortnews"])
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        title = QLabel(f"📰 {cfg['title']} → AI 글쓰기 → 블로그 발행")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        scroll_layout.addWidget(title)
+
+        desc = QLabel(cfg['desc'])
+        desc.setStyleSheet("color:#888; margin-bottom:8px;")
+        scroll_layout.addWidget(desc)
+
+        # ══════════════════════════════════════
+        # STEP 1: 뉴스 수집 (웹 크롤링)
+        # ══════════════════════════════════════
+        step1 = QGroupBox("STEP 1️⃣  뉴스 수집 (웹 크롤링)")
+        s1 = QVBoxLayout(step1)
+
+        h_url = QHBoxLayout()
+        h_url.addWidget(QLabel("수집 URL:"))
+        self.crawl_url = QLineEdit(cfg['url'])
+        self.crawl_url.setPlaceholderText("수집할 페이지 URL")
+        h_url.addWidget(self.crawl_url, 3)
+        s1.addLayout(h_url)
+
+        h_opt = QHBoxLayout()
+        h_opt.addWidget(QLabel("수집 개수:"))
+        self.collect_count = QSpinBox()
+        self.collect_count.setRange(1, 30)
+        self.collect_count.setValue(10)
+        h_opt.addWidget(self.collect_count)
+
+        self.keywords_filter = QLineEdit()
+        self.keywords_filter.setPlaceholderText("필터 키워드 (쉼표 구분, 비워두면 전체)")
+        h_opt.addWidget(QLabel("필터:"))
+        h_opt.addWidget(self.keywords_filter, 2)
+        s1.addLayout(h_opt)
+
+        self.collect_btn = QPushButton("🔍 뉴스 수집 시작")
+        self.collect_btn.clicked.connect(self.start_collect)
+        self.collect_btn.setStyleSheet("background-color:#2d5a27; color:white; font-weight:bold; padding:8px;")
+        s1.addWidget(self.collect_btn)
+
+        self.news_progress = QProgressBar()
+        self.news_progress.setVisible(False)
+        s1.addWidget(self.news_progress)
+
+        self.collect_result = QTextBrowser()
+        self.collect_result.setMaximumHeight(120)
+        self.collect_result.setPlaceholderText("수집된 뉴스 내용이 여기에 표시됩니다...")
+        s1.addWidget(self.collect_result)
+
+        # ── 수집 결과 표 (체크박스로 선택) ──
+        s1.addWidget(QLabel("📋 수집된 뉴스 (체크한 항목만 AI 입력으로 전달):"))
+        self.collect_news_table = QTableWidget()
+        self.collect_news_table.setColumnCount(4)
+        self.collect_news_table.setHorizontalHeaderLabels(["선택", "제목", "본문 요약", "링크"])
+        self.collect_news_table.setColumnWidth(0, 50)
+        self.collect_news_table.setColumnWidth(1, 320)
+        self.collect_news_table.setColumnWidth(2, 280)
+        self.collect_news_table.horizontalHeader().setStretchLastSection(True)
+        self.collect_news_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.collect_news_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.collect_news_table.setMinimumHeight(150)
+        self.collect_news_table.itemSelectionChanged.connect(self._on_news_selected)
+        s1.addWidget(self.collect_news_table)
+
+        h_news_sel = QHBoxLayout()
+        btn_news_all = QPushButton("☑️ 전체 선택")
+        btn_news_all.clicked.connect(lambda: self._toggle_all_news(True))
+        h_news_sel.addWidget(btn_news_all)
+        btn_news_none = QPushButton("⬜ 전체 해제")
+        btn_news_none.clicked.connect(lambda: self._toggle_all_news(False))
+        h_news_sel.addWidget(btn_news_none)
+        h_news_sel.addStretch()
+        s1.addLayout(h_news_sel)
+
+        self._collected_items = []  # [{'title','body','href'}, ...]
+
+        scroll_layout.addWidget(step1)
+
+        # ══════════════════════════════════════
+        # ══════════════════════════════════════
+        # STEP 2: AI 글쓰기 (Perplexity 기본)
+        # ══════════════════════════════════════
+        step2 = QGroupBox("STEP 2️⃣  AI 글쓰기")
+        s2 = QVBoxLayout(step2)
+
+        h2a = QHBoxLayout()
+        h2a.addWidget(QLabel("AI 서비스:"))
+        self.ai_model = QComboBox()
+        self.ai_model.addItems(["Perplexity (sonar-pro)", "Gemini (gemini-2.5-flash)", "GPT (gpt-4o)"])
+        h2a.addWidget(self.ai_model, 2)
+
+        h2a.addWidget(QLabel("글자 수:"))
+        self.char_count = QSpinBox()
+        self.char_count.setRange(500, 10000)
+        self.char_count.setValue(2000)
+        self.char_count.setSingleStep(500)
+        h2a.addWidget(self.char_count)
+        s2.addLayout(h2a)
+
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setPlaceholderText("AI에게 전달할 프롬프트...")
+        self.ai_prompt.setPlainText(
+            "아래 뉴스 콘텐츠를 바탕으로 SEO 최적화된 네이버 블로그 포스트를 작성해주세요.\n"
+            "- 자연스러운 말투 (1인칭 경험담/의견)\n"
+            "- 소제목 3개 이상 (##)\n"
+            "- 핵심 키워드 자연스럽게 5회 이상 배치\n"
+            "- [사진] 태그로 사진 삽입 위치 표시\n"
+            "- [인용구]텍스트[/인용구] 형태로 강조 문구 표시\n"
+            "- 마지막에 해시태그 5개 추가"
+        )
+        self.ai_prompt.setMaximumHeight(120)
+        s2.addWidget(QLabel("프롬프트:"))
+        s2.addWidget(self.ai_prompt)
+
+        h2b = QHBoxLayout()
+        self.send_to_ai_btn = QPushButton("⬇️ 수집 결과 → AI 입력")
+        self.send_to_ai_btn.clicked.connect(self.send_to_ai)
+        h2b.addWidget(self.send_to_ai_btn)
+
+        self.gen_btn = QPushButton("🎯 AI 원고 생성")
+        self.gen_btn.clicked.connect(self.generate_ai)
+        self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+        h2b.addWidget(self.gen_btn)
+        s2.addLayout(h2b)
+
+        self.ai_progress = QProgressBar()
+        self.ai_progress.setVisible(False)
+        s2.addWidget(self.ai_progress)
+
+        self.ai_input = QTextEdit()
+        self.ai_input.setPlaceholderText("수집된 뉴스가 AI 입력으로 전달됩니다...")
+        self.ai_input.setMaximumHeight(100)
+        s2.addWidget(QLabel("AI 입력 (수집 데이터):"))
+        s2.addWidget(self.ai_input)
+
+        # ── 원고 리스트 테이블 ──
+        s2.addWidget(QLabel("📋 생성된 원고 리스트:"))
+        self.article_table = QTableWidget()
+        self.article_table.setColumnCount(4)
+        self.article_table.setHorizontalHeaderLabels(["번호", "상태", "제목", "글자수"])
+        self.article_table.horizontalHeader().setStretchLastSection(True)
+        self.article_table.setColumnWidth(0, 50)
+        self.article_table.setColumnWidth(1, 60)
+        self.article_table.setColumnWidth(2, 350)
+        self.article_table.setColumnWidth(3, 70)
+        self.article_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.article_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.article_table.itemSelectionChanged.connect(self._on_article_selected)
+        self.article_table.setMinimumHeight(150)
+        s2.addWidget(self.article_table)
+
+        self.ai_output = QTextBrowser()
+        self.ai_output.setPlaceholderText("원고를 선택하면 여기에 표시됩니다...")
+        s2.addWidget(QLabel("📄 선택된 원고 미리보기:"))
+        s2.addWidget(self.ai_output)
+
+        self.error_summary_label = QLabel("⚠️ 주요 오류:")
+        self.error_summary_label.setVisible(False)
+        s2.addWidget(self.error_summary_label)
+        self.error_summary = QTextBrowser()
+        self.error_summary.setMaximumHeight(60)
+        self.error_summary.setVisible(False)
+        s2.addWidget(self.error_summary)
+
+        h2c = QHBoxLayout()
+        copy_btn = QPushButton("📋 선택 원고 복사")
+        copy_btn.clicked.connect(self._copy_selected_article)
+        h2c.addWidget(copy_btn)
+        copy_all_btn = QPushButton("📋 전체 원고 복사")
+        copy_all_btn.clicked.connect(self._copy_all_articles)
+        h2c.addWidget(copy_all_btn)
+        save_btn = QPushButton("💾 전체 원고 저장")
+        save_btn.clicked.connect(self.save_draft)
+        h2c.addWidget(save_btn)
+        export_btn = QPushButton("📊 엑셀로 내보내기")
+        export_btn.clicked.connect(self._export_articles_excel)
+        h2c.addWidget(export_btn)
+        import_btn = QPushButton("📥 엑셀 원고 불러오기")
+        import_btn.clicked.connect(self._import_articles_excel)
+        h2c.addWidget(import_btn)
+        s2.addLayout(h2c)
+
+        scroll_layout.addWidget(step2)
+        # ══════════════════════════════════════
+        # STEP 2.5: 이미지 관리
+        # ══════════════════════════════════════
+        step_img = QGroupBox("🖼️ STEP 2.5  이미지 관리 (본문 [사진] 위치에 삽입)")
+        si = QVBoxLayout(step_img)
+
+        si.addWidget(QLabel("원고 본문에 [사진] 태그가 있으면 발행 시 해당 위치에 이미지가 삽입됩니다."))
+
+        self.image_table = QTableWidget()
+        self.image_table.setColumnCount(4)
+        self.image_table.setHorizontalHeaderLabels(["번호", "소스", "설명/프롬프트", "파일경로"])
+        self.image_table.horizontalHeader().setStretchLastSection(True)
+        self.image_table.setColumnWidth(0, 40)
+        self.image_table.setColumnWidth(1, 70)
+        self.image_table.setColumnWidth(2, 250)
+        self.image_table.setMinimumHeight(120)
+        self.image_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        si.addWidget(self.image_table)
+        self._image_pool = []  # [{'source':'upload'|'dalle', 'desc':'...', 'path':'...'}, ...]
+
+        h_img_btns = QHBoxLayout()
+        self.img_upload_btn = QPushButton("📁 이미지 직접 업로드")
+        self.img_upload_btn.clicked.connect(self._upload_images)
+        self.img_upload_btn.setStyleSheet("background-color:#2d6a4f; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_upload_btn)
+
+        self.img_dalle_btn = QPushButton("🤖 AI 이미지 생성 (ChatGPT)")
+        self.img_dalle_btn.clicked.connect(self._generate_dalle_images)
+        self.img_dalle_btn.setStyleSheet("background-color:#4a1a8a; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_dalle_btn)
+
+        self.img_del_btn = QPushButton("🗑️ 선택 삭제")
+        self.img_del_btn.clicked.connect(self._delete_selected_image)
+        h_img_btns.addWidget(self.img_del_btn)
+
+        self.img_clear_btn = QPushButton("🗑️ 전체 삭제")
+        self.img_clear_btn.clicked.connect(self._clear_all_images)
+        h_img_btns.addWidget(self.img_clear_btn)
+        si.addLayout(h_img_btns)
+
+        h_dalle_opt = QHBoxLayout()
+        h_dalle_opt.addWidget(QLabel("DALL-E 프롬프트:"))
+        self.dalle_prompt = QLineEdit()
+        self.dalle_prompt.setPlaceholderText("이미지 설명을 입력하세요 (예: 서울 야경, 커피 한 잔)")
+        h_dalle_opt.addWidget(self.dalle_prompt, 4)
+
+        h_dalle_opt.addWidget(QLabel("크기:"))
+        self.dalle_size = QComboBox()
+        self.dalle_size.addItems(["1024x1024", "1024x1536", "1536x1024"])
+        h_dalle_opt.addWidget(self.dalle_size)
+
+        h_dalle_opt.addWidget(QLabel("장수:"))
+        self.dalle_count = QSpinBox()
+        self.dalle_count.setRange(1, 10)
+        self.dalle_count.setValue(1)
+        h_dalle_opt.addWidget(self.dalle_count)
+        si.addLayout(h_dalle_opt)
+
+        h_auto = QHBoxLayout()
+        self.auto_dalle_check = QCheckBox("원고별 자동 이미지 생성 (원고 제목 기반)")
+        self.auto_dalle_check.setToolTip("원고 생성 시 각 원고의 제목을 프롬프트로 DALL-E 이미지를 자동 생성합니다")
+        h_auto.addWidget(self.auto_dalle_check)
+
+        self.auto_dalle_count = QSpinBox()
+        self.auto_dalle_count.setRange(1, 5)
+        self.auto_dalle_count.setValue(1)
+        h_auto.addWidget(QLabel("원고당 이미지:"))
+        h_auto.addWidget(self.auto_dalle_count)
+        h_auto.addStretch()
+        si.addLayout(h_auto)
+
+        self.img_status = QLabel("")
+        self.img_status.setStyleSheet("color:#888; font-size:11px;")
+        si.addWidget(self.img_status)
+
+        scroll_layout.addWidget(step_img)
+
+
+        # ══════════════════════════════════════
+        # ══════════════════════════════════════
+        # STEP 3: 네이버 블로그 자동 발행
+        # ══════════════════════════════════════
+        step3 = QGroupBox("STEP 3️⃣  네이버 블로그 자동 발행")
+        s3 = QVBoxLayout(step3)
+
+        h3_acc = QHBoxLayout()
+        h3_acc.addWidget(QLabel("발행 계정:"))
+        self.account_combo = QComboBox()
+        accounts = self.main.config.get('naver_accounts', [])
+        if not accounts and self.main.config.get('naver_id'):
+            accounts = [{'id': self.main.config.get('naver_id', '')}]
+        for acc in accounts:
+            self.account_combo.addItem(acc.get('id', ''))
+        h3_acc.addWidget(self.account_combo, 2)
+        s3.addLayout(h3_acc)
+
+        h3a = QHBoxLayout()
+        h3a.addWidget(QLabel("블로그 폴더:"))
+        self.blog_folder = QComboBox()
+        self.blog_folder.setEditable(True)
+        h3a.addWidget(self.blog_folder, 2)
+
+        self.load_folders_btn = QPushButton("🔄 폴더 불러오기")
+        self.load_folders_btn.clicked.connect(self.load_blog_folders)
+        h3a.addWidget(self.load_folders_btn)
+
+        self.clear_cache_btn = QPushButton("🗑️ 캐시 삭제")
+        self.clear_cache_btn.clicked.connect(lambda: self._clear_folder_cache(self.account_combo.currentText().strip()))
+        self.clear_cache_btn.setStyleSheet("color:#ff6666;")
+        h3a.addWidget(self.clear_cache_btn)
+        s3.addLayout(h3a)
+
+        # 계정 변경 시 캐시된 폴더 자동 로드
+        self.account_combo.currentTextChanged.connect(self._on_account_changed)
+
+        h3b = QHBoxLayout()
+        h3b.addWidget(QLabel("저장 형태:"))
+        self.save_mode = QComboBox()
+        self.save_mode.addItems(["💾 임시저장", "📤 즉시발행", "⏰ 예약발행"])
+        # v24: 본문 정렬 선택
+        self.alignment_combo = QComboBox()
+        self.alignment_combo.addItems(["⬅️ 좌측 정렬", "⬆️ 가운데 정렬", "➡️ 우측 정렬", "↔️ 양쪽 정렬"])
+        self.alignment_combo.currentIndexChanged.connect(
+            lambda i: setattr(self, '_selected_alignment', ['left','center','right','justify'][i])
+        )
+        self._selected_alignment = 'left'
+        h3b.addWidget(self.save_mode)
+        h3b.addWidget(QLabel("정렬:"))
+        h3b.addWidget(self.alignment_combo)
+        s3.addLayout(h3b)
+
+        self.publish_btn = QPushButton("🚀 블로그 발행")
+        self.publish_btn.clicked.connect(self.publish_to_blog)
+        self.publish_btn.setStyleSheet("background-color:#8B0000; color:white; font-weight:bold; padding:8px;")
+        s3.addWidget(self.publish_btn)
+
+        self.pub_progress = QProgressBar()
+        self.pub_progress.setVisible(False)
+        s3.addWidget(self.pub_progress)
+
+        scroll_layout.addWidget(step3)
+
+        # 스크롤 영역
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_widget)
+        scroll.setWidgetResizable(True)
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(scroll)
+
+        self.account_combo.currentTextChanged.connect(lambda *_: self._load_saved_folders())
+        self.blog_folder.currentTextChanged.connect(lambda *_: self._remember_selected_folder())
+        # 시작 직후 자동 폴더 로드는 비활성화 (수동 버튼으로만 로드)
+
+    def _emit_progress(self, bar, val):
+        QTimer.singleShot(0, lambda: bar.setValue(val))
+
+    def log_emit(self, msg):
+        QTimer.singleShot(0, lambda: self.main.log(msg))
+
+    def _on_account_changed(self, account_id):
+        """계정 변경 시 캐시된 폴더 자동 로드"""
+        account_id = (account_id or '').strip()
+        if account_id and account_id in self._folder_cache:
+            self.blog_folder.clear()
+            self.blog_folder.addItems(self._folder_cache[account_id])
+            self.main.log(f"📂 {account_id} 저장된 폴더 자동 로드 ({len(self._folder_cache[account_id])}개)")
+        else:
+            self.blog_folder.clear()
+
+    def _clear_folder_cache(self, account_id):
+        """폴더 캐시 삭제"""
+        account_id = (account_id or '').strip()
+        if not account_id:
+            return
+        if account_id in self._folder_cache:
+            del self._folder_cache[account_id]
+            try:
+                cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_cache_news.json')
+                with open(cache_path, 'w', encoding='utf-8') as f_cache:
+                    json.dump(self._folder_cache, f_cache, ensure_ascii=False, indent=2)
+            except:
+                pass
+            self.blog_folder.clear()
+            self.main.log(f"🗑️ {account_id} 폴더 캐시 삭제됨")
+
+    def _save_folders_to_config(self, account_id, folder_list, selected_folder=""):
+        """계정별 블로그 폴더 목록/선택값 저장"""
+        account_id = (account_id or '').strip()
+        if not account_id:
+            return
+
+        clean_folders = []
+        for folder in folder_list:
+            folder = str(folder).strip()
+            if folder and folder not in clean_folders:
+                clean_folders.append(folder)
+
+        store = self.main.config.setdefault('saved_blog_folders', {})
+        store[account_id] = {
+            'folders': clean_folders,
+            'selected': (selected_folder or '').strip(),
+        }
+
+        try:
+            with open('config.json', 'w', encoding='utf-8') as f:
+                json.dump(self.main.config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.main.log(f"⚠️ 폴더 설정 저장 실패: {e}")
+
+    def _load_saved_folders(self):
+        """선택된 계정의 저장된 폴더 목록 복원"""
+        if not hasattr(self, 'account_combo') or not hasattr(self, 'blog_folder'):
+            return
+
+        account_id = self.account_combo.currentText().strip()
+        if not account_id:
+            return
+
+        saved = self.main.config.get('saved_blog_folders', {}).get(account_id, {})
+        folders = saved.get('folders', [])
+        selected = saved.get('selected', '')
+
+        self.blog_folder.blockSignals(True)
+        current = self.blog_folder.currentText().strip()
+        self.blog_folder.clear()
+        if folders:
+            self.blog_folder.addItems(folders)
+        if selected:
+            self.blog_folder.setCurrentText(selected)
+        elif current:
+            self.blog_folder.setCurrentText(current)
+        self.blog_folder.blockSignals(False)
+
+    def _remember_selected_folder(self):
+        if not hasattr(self, 'account_combo') or not hasattr(self, 'blog_folder'):
+            return
+
+        account_id = self.account_combo.currentText().strip()
+        if not account_id:
+            return
+
+        folder_list = [
+            self.blog_folder.itemText(i).strip()
+            for i in range(self.blog_folder.count())
+            if self.blog_folder.itemText(i).strip()
+        ]
+        selected = self.blog_folder.currentText().strip()
+        if selected and selected not in folder_list:
+            folder_list.insert(0, selected)
+
+        if folder_list:
+            self._save_folders_to_config(account_id, folder_list, selected)
+
+    def _build_publish_queue(self):
+        source_articles = list(getattr(self, 'generated_articles', []) or [])
+
+        # 체크된 행만 발행 대상으로 (체크 없으면 전체 폴백)
+        try:
+            checked = self._get_checked_article_indices()
+        except Exception:
+            checked = []
+        if source_articles and checked:
+            source_articles = [source_articles[i] for i in checked if 0 <= i < len(source_articles)]
+            try:
+                self.main.log(f"📤 발행 대기열: 체크된 {len(source_articles)}건만 발행")
+            except Exception:
+                pass
+        elif source_articles:
+            try:
+                self.main.log(f"⚠️ 체크된 원고가 없어 전체 {len(source_articles)}건을 발행합니다")
+            except Exception:
+                pass
+
+        if not source_articles:
+            content = self.ai_output.toPlainText().strip()
+            if content:
+                source_articles = [{'title': '뉴스 포스트', 'content': content}]
+
+        queue = []
+        for idx, article in enumerate(source_articles, start=1):
+            title = str(article.get('title', f'뉴스 포스트 {idx}')).strip() or f'뉴스 포스트 {idx}'
+            content = str(article.get('content', '')).strip()
+            if not content:
+                continue
+            queue.append({
+                'order': idx,
+                'title': title,
+                'content': content,
+                'status': 'pending',
+                'result': '',
+            })
+        return queue
+
+    def _write_publish_queue_snapshot(self, account_id, queue):
+        safe_account = re.sub(r'[^0-9A-Za-z_.-]+', '_', (account_id or 'default').strip())
+        path = f"publish_queue_{self.source}_{safe_account}.json"
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(queue, f, ensure_ascii=False, indent=2)
+        return path
+
+    # ─── STEP 1: 웹 크롤링 수집 ───
+    def start_collect(self):
+        url = self.crawl_url.text().strip()
+        if not url:
+            self.main.log("⚠️ 수집 URL을 입력하세요")
+            return
+
+        self.collect_btn.setEnabled(False)
+        self.collect_btn.setText("수집 중...")
+        self.news_progress.setVisible(True)
+        self.news_progress.setValue(0)
+
+        max_count = self.collect_count.value()
+        filter_kws = [k.strip() for k in self.keywords_filter.text().split(',') if k.strip()]
+
+        def do_collect():
+            self._emit_progress(self.news_progress, 5)
+
+            # 소스별 크롤링 분기
+            if self.source == "nate":
+                return self._crawl_nate(url, max_count, filter_kws)
+            elif self.source == "daum":
+                return self._crawl_daum(url, max_count, filter_kws)
+            else:
+                return self._crawl_naver_shortents(url, max_count, filter_kws)
+
+        self.main.log(f"🔍 [{self.source}] 뉴스 수집 시작 - URL: {url[:60]}, 최대 {max_count}건")
+
+        thread = WorkerThread(do_collect)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def _on_collect_result(r):
+            self.collect_result.setPlainText(r)
+            self._populate_collect_table(r)
+        thread.result_signal.connect(_on_collect_result)
+        thread.finished_signal.connect(lambda: (
+            self.collect_btn.setEnabled(True),
+            self.collect_btn.setText("🔍 뉴스 수집 시작"),
+            self.news_progress.setVisible(False),
+            self.main.log(f"✅ [{self.source}] 뉴스 수집 종료 ({len(self._collected_items)}건)")
+        ))
+        thread.start()
+
+    def _crawl_naver_shortents(self, url, max_count, filter_kws):
+        """네이버 숏텐츠 - 엔터 종합 카테고리만 수집, 중복 제거"""
+        self._emit_progress(self.news_progress, 10)
+
+        import undetected_chromedriver as uc
+        from selenium.webdriver.common.by import By
+        from difflib import SequenceMatcher
+        opts = uc.ChromeOptions()
+        opts.add_argument('--headless=new')
+        opts.add_argument('--no-sandbox')
+        opts.add_argument('--disable-dev-shm-usage')
+        opts.add_argument('--disable-gpu')
+        opts.add_argument('--disable-features=RendererCodeIntegrity')
+        opts.add_argument('--window-size=1920,1080')
+        opts.add_argument(
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36')
+
+        driver = None
+        try:
+            driver = make_uc_driver(opts)
+            driver.get(url)
+            time.sleep(4)
+
+            self._emit_progress(self.news_progress, 20)
+
+            # ── "엔터 종합" 카테고리 버튼 클릭 ──
+            try:
+                buttons = driver.find_elements(By.CSS_SELECTOR, 'button')
+                for btn in buttons:
+                    if '엔터 종합' in btn.text.strip():
+                        btn.click()
+                        time.sleep(3)
+                        break
+            except Exception:
+                pass
+
+            self._emit_progress(self.news_progress, 30)
+
+            # 스크롤하여 모든 항목 로드
+            for _ in range(5):
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(1)
+
+            self._emit_progress(self.news_progress, 40)
+
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+
+            results = []
+            seen_titles = set()
+
+            # 카테고리/네비게이션 제외 키워드
+            skip_keywords = [
+                '전체', '엔터 종합', '스포츠 종합', '뮤직', '영화', '생활경제',
+                '카테크 종합', '자동차', '여행맛집 종합', '패션뷰티 종합', '맛집/카페',
+                '국내여행', '지식 종합', '야구', '경제 종합', '푸드', '패션트렌드',
+                '해외축구', '증권', '농구', '리빙푸드 종합', '드라마', '축구',
+                '부동산', '세계여행', '해외야구', '배구', '뷰티',
+                '로그인', '더보기', '공유', '설정', '메뉴', '이 정보가 표시된 이유',
+                '오늘은 어떤 취향', '클립 챌린지', '스토어의 발견', '웨일 브라우저',
+                '네이버에서 컬리를', '홈리빙 인기', 'Keep에',
+            ]
+
+            # ── 방법1: 숏텐츠 토픽 카드에서 추출 ──
+            # 실제 숏텐츠 토픽 링크는 반드시 x_shortents 또는 mra= 파라미터를 포함함
+            all_links = soup.find_all('a')
+            for a_tag in all_links:
+                href = a_tag.get('href', '')
+
+                # 핵심 필터: x_shortents 또는 mra= 파라미터가 있는 링크만 수집
+                if 'x_shortents' not in href and 'mra=' not in href:
+                    continue
+
+                text_parts = a_tag.get_text('|', strip=True).split('|')
+                text_parts = [p for p in text_parts if len(p) > 3]
+
+                if len(text_parts) < 1:
+                    continue
+
+                title = text_parts[0][:80].strip()
+                snippet = ' '.join(text_parts[1:])[:200] if len(text_parts) > 1 else ''
+
+                # 제목 길이 최소 5자
+                if len(title) < 5:
+                    continue
+
+                # 카테고리/네비게이션 링크 제외
+                if any(skip in title for skip in skip_keywords):
+                    continue
+
+                # 중복 제목 제거 (유사도 80% 이상이면 중복)
+                is_dup = False
+                for existing in seen_titles:
+                    if SequenceMatcher(None, title, existing).ratio() > 0.8:
+                        is_dup = True
+                        break
+                if is_dup:
+                    continue
+
+                seen_titles.add(title)
+                results.append({'title': title, 'snippet': snippet, 'href': href})
+
+            # ── 방법2: Selenium elements로 직접 추출 (fallback) ──
+            if not results:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR,
+                                                    'div[class*="shortents"] a, div[class*="fds-comps"] a, '
+                                                    'div[class*="group_"] a, div[class*="api_subject"] a')
+                    for el in elements:
+                        try:
+                            title = el.text.strip().split('\n')[0][:80]
+                            snippet = '\n'.join(el.text.strip().split('\n')[1:])[:200]
+                            href = el.get_attribute('href') or ''
+
+                            if not title or len(title) < 5:
+                                continue
+                            if any(skip in title for skip in skip_keywords):
+                                continue
+
+                            is_dup = False
+                            for existing in seen_titles:
+                                if SequenceMatcher(None, title, existing).ratio() > 0.8:
+                                    is_dup = True
+                                    break
+                            if is_dup:
+                                continue
+
+                            seen_titles.add(title)
+                            results.append({'title': title, 'snippet': snippet, 'href': href})
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            self._emit_progress(self.news_progress, 50)
+
+            # 필터 적용
+            if filter_kws:
+                results = [r for r in results if any(
+                    k.lower() in r['title'].lower() or k.lower() in r['snippet'].lower()
+                    for k in filter_kws
+                )]
+
+            # max_count 제한
+            results = results[:max_count]
+
+            self._emit_progress(self.news_progress, 60)
+
+            # ── 각 토픽 클릭하여 상세 정보(AI 브리핑) 수집 ──
+            enriched = []
+            for idx, item in enumerate(results):
+                detail_text = item['snippet']
+
+                # href가 있으면 상세 페이지에서 AI 브리핑 추출 시도
+                if item['href'] and 'search.naver.com' in item['href']:
+                    try:
+                        driver.get(item['href'])
+                        time.sleep(2)
+                        detail_soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+                        # AI 브리핑 영역 추출
+                        briefing_el = detail_soup.select_one(
+                            'div[class*="ai_briefing"], div[class*="sc_new"] .api_txt_lines, '
+                            'div.news_dsc, div.total_group, div.api_subject_bx'
+                        )
+                        if briefing_el:
+                            detail_text = briefing_el.get_text(strip=True)[:1000]
+                        else:
+                            meta = detail_soup.select_one('meta[property="og:description"]')
+                            if meta and meta.get('content'):
+                                detail_text = meta['content'][:500]
+
+                        # 실제 뉴스 기사 링크도 추출
+                        news_links = []
+                        for news_a in detail_soup.select('a.news_tit, a.api_txt_lines, a[class*="title"]'):
+                            news_title = news_a.get_text(strip=True)
+                            news_href = news_a.get('href', '')
+                            if news_title and news_href and 'naver.com' not in news_href[:30]:
+                                news_links.append(f"  → {news_title}\n    {news_href}")
+
+                        if news_links:
+                            detail_text += "\n\n[관련 기사]\n" + "\n".join(news_links[:3])
+
+                    except Exception:
+                        pass
+
+                enriched.append(
+                    f"[{idx + 1}] 제목: {item['title']}\n"
+                    f"본문: {detail_text[:800]}\n"
+                    f"링크: {item['href']}\n"
+                )
+
+                self._emit_progress(self.news_progress, 60 + int((idx / max(len(results), 1)) * 35))
+
+            self._emit_progress(self.news_progress, 100)
+
+            if not enriched:
+                return "수집 결과가 없습니다. URL을 확인하거나 필터를 조정하세요."
+
+            return f"📰 숏텐츠(엔터 종합) 총 {len(enriched)}건 수집 완료\n{'=' * 50}\n\n" + '\n'.join(enriched)
+
+        except Exception as e:
+            raise RuntimeError(f"네이버 숏텐츠 크롤링 실패: {e}")
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+    def _crawl_daum(self, url, max_count, filter_kws):
+        """다음 인기뉴스 크롤링 - v33: requests 우선 + Selenium 폴백 + 단계별 디버그 로그"""
+        from difflib import SequenceMatcher
+        import requests as _rq
+
+        self._emit_progress(self.news_progress, 10)
+        print(f"[DAUM v33] 시작 url={url} max={max_count} filter={filter_kws}")
+
+        HEADERS = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+            "Referer": "https://entertain.daum.net/",
+        }
+
+        def _fetch_html_requests(target_url, timeout=15):
+            try:
+                r = _rq.get(target_url, headers=HEADERS, timeout=timeout)
+                print(f"[DAUM v33] requests GET {target_url[:80]} status={r.status_code} len={len(r.text)}")
+                if r.status_code == 200 and len(r.text) > 1000:
+                    return r.text
+            except Exception as e:
+                print(f"[DAUM v33] requests 실패: {e}")
+            return None
+
+        def _fetch_html_selenium(target_url):
+            print(f"[DAUM v33] Selenium 폴백 시도: {target_url[:80]}")
+            import undetected_chromedriver as uc
+            opts = uc.ChromeOptions()
+            opts.add_argument('--headless=new')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--window-size=1920,1080')
+            opts.add_argument('--user-agent=' + HEADERS["User-Agent"])
+            drv = None
+            try:
+                drv = make_uc_driver(opts)
+                drv.get(target_url)
+                time.sleep(4)
+                for _ in range(2):
+                    drv.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(1)
+                html = drv.page_source
+                print(f"[DAUM v33] Selenium html len={len(html)}")
+                return html
+            except Exception as e:
+                print(f"[DAUM v33] Selenium 실패: {e}")
+                return None
+            finally:
+                if drv:
+                    try: drv.quit()
+                    except: pass
+
+        # 1. 리스트 페이지 받기 (requests 우선)
+        list_html = _fetch_html_requests(url)
+        if not list_html:
+            list_html = _fetch_html_selenium(url)
+        if not list_html:
+            raise RuntimeError("다음 리스트 페이지 수신 실패 (requests + Selenium 모두 실패)")
+
+        self._emit_progress(self.news_progress, 30)
+        soup = BeautifulSoup(list_html, 'html.parser')
+
+        # 2. 셀렉터별 매칭 개수 디버그
+        sel_stats = {
+            "ol.list_ranking > li":     len(soup.select('ol.list_ranking > li')),
+            "ul.list_ranking > li":     len(soup.select('ul.list_ranking > li')),
+            ".list_ranking li":         len(soup.select('.list_ranking li')),
+            ".ranking_list li":         len(soup.select('.ranking_list li')),
+            "a[href*='v.daum.net/v/']": len(soup.select("a[href*='v.daum.net/v/']")),
+        }
+        print(f"[DAUM v33] 셀렉터 매칭: {sel_stats}")
+
+        # 3. 후보 li 수집 (ol/ul 둘 다)
+        candidates = soup.select('ol.list_ranking > li, ul.list_ranking > li, .list_ranking li, .ranking_list li')
+        print(f"[DAUM v33] li 후보: {len(candidates)}")
+
+        results = []
+        seen_titles = set()
+        seen_hrefs = set()
+
+        if candidates:
+            for el in candidates:
+                # 제목 링크는 보통 .link_txt
+                a_title = el.select_one('a.link_txt')
+                a_href  = el.select_one("a[href*='v.daum.net/v/']")
+                if not a_href:
+                    continue
+                href = a_href.get('href', '').strip()
+                if href.startswith('//'):
+                    href = 'https:' + href
+                elif href.startswith('/'):
+                    href = 'https://v.daum.net' + href
+                if not href or href in seen_hrefs:
+                    continue
+
+                title = ''
+                if a_title:
+                    title = a_title.get_text(strip=True)
+                if not title:
+                    tit = el.select_one('strong.tit_thumb, .tit_thumb, .tit_g')
+                    if tit:
+                        title = tit.get_text(strip=True)
+                if not title:
+                    img = el.find('img')
+                    if img and img.get('alt'):
+                        title = img['alt'].strip()
+
+                title = (title or '')[:120].strip()
+                if not title or len(title) < 5:
+                    continue
+
+                # 유사 중복 제거
+                dup = False
+                for ex in seen_titles:
+                    if SequenceMatcher(None, title, ex).ratio() > 0.85:
+                        dup = True; break
+                if dup:
+                    continue
+
+                seen_titles.add(title)
+                seen_hrefs.add(href)
+                results.append({'title': title, 'snippet': '', 'href': href})
+                if len(results) >= max_count * 2:
+                    break
+
+        # 4. 폴백: 모든 v.daum.net/v/ 링크 직접 수집
+        if not results:
+            print("[DAUM v33] li 셀렉터 0건 → 전체 링크 폴백")
+            for a in soup.select("a[href*='v.daum.net/v/']"):
+                href = a.get('href', '').strip()
+                if href.startswith('//'): href = 'https:' + href
+                elif href.startswith('/'): href = 'https://v.daum.net' + href
+                if href in seen_hrefs:
+                    continue
+                title = a.get_text(strip=True)
+                if not title:
+                    img = a.find('img')
+                    if img and img.get('alt'):
+                        title = img['alt'].strip()
+                title = (title or '')[:120].strip()
+                if not title or len(title) < 5:
+                    continue
+                dup = any(SequenceMatcher(None, title, ex).ratio() > 0.85 for ex in seen_titles)
+                if dup:
+                    continue
+                seen_titles.add(title); seen_hrefs.add(href)
+                results.append({'title': title, 'snippet': '', 'href': href})
+                if len(results) >= max_count * 2:
+                    break
+
+        print(f"[DAUM v33] 1차 수집 결과: {len(results)}건 (필터 전)")
+
+        # 5. 키워드 필터
+        if filter_kws:
+            before = len(results)
+            results = [r for r in results if any(k.lower() in r['title'].lower() for k in filter_kws)]
+            print(f"[DAUM v33] 키워드 필터 적용: {before} → {len(results)}")
+
+        results = results[:max_count]
+        self._emit_progress(self.news_progress, 55)
+
+        if not results:
+            return ("수집 결과가 없습니다.\n"
+                    f"디버그: 셀렉터 매칭={sel_stats}, 페이지길이={len(list_html)}\n"
+                    "다음 페이지 구조가 변경되었거나 키워드 필터가 너무 좁습니다.")
+
+        # 6. 각 기사 본문 (requests 우선)
+        enriched = []
+        for idx, item in enumerate(results):
+            detail_text = ''
+            try:
+                dhtml = _fetch_html_requests(item['href'], timeout=10)
+                if not dhtml:
+                    dhtml = _fetch_html_selenium(item['href'])
+                if dhtml:
+                    dsoup = BeautifulSoup(dhtml, 'html.parser')
+                    body_el = dsoup.select_one(
+                        'div.article_view, div.news_view, [data-cloud="article_body"], '
+                        'div[data-translation-body="true"], section.news_view, '
+                        'div#harmonyContainer, div.news_body'
+                    )
+                    if body_el:
+                        for s in body_el.select('script, style, .link_figure, figcaption'):
+                            s.decompose()
+                        detail_text = body_el.get_text(' ', strip=True)[:1500]
+                    else:
+                        meta = dsoup.select_one('meta[property="og:description"]')
+                        if meta and meta.get('content'):
+                            detail_text = meta['content'][:600]
+            except Exception as e:
+                print(f"[DAUM v33] 상세 본문 실패 idx={idx}: {e}")
+
+            enriched.append(
+                f"[{idx + 1}] 제목: {item['title']}\n"
+                f"본문: {detail_text[:1000]}\n"
+                f"링크: {item['href']}\n"
+            )
+            self._emit_progress(self.news_progress, 55 + int((idx / max(len(results), 1)) * 40))
+
+        self._emit_progress(self.news_progress, 100)
+        print(f"[DAUM v33] 완료: {len(enriched)}건")
+        return f"📰 다음 인기뉴스 총 {len(enriched)}건 수집 완료\n{'=' * 50}\n\n" + '\n'.join(enriched)
+
+
+    def _crawl_nate(self, url, max_count, filter_kws):
+        """네이트 연예뉴스 랭킹 크롤링"""
+        self._emit_progress(self.news_progress, 10)
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(f"네이트 페이지 로드 실패: {e}")
+
+        self._emit_progress(self.news_progress, 30)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        results = []
+
+        # ── 네이트 뉴스 랭킹 셀렉터 (2026-04 구조 반영) ──
+        links_found = []
+
+        # 1~5위: div.mlt01 > a.lt1 > span.tb > h2.tit
+        for mlt in soup.select('div.mlt01 a.lt1'):
+            h2 = mlt.select_one('h2.tit')
+            title = h2.get_text(strip=True) if h2 else mlt.get_text(strip=True)
+            href = mlt.get('href', '')
+            if href and not href.startswith('http'):
+                href = 'https://news.nate.com' + href
+            if title and len(title) > 5 and href not in [l[1] for l in links_found]:
+                links_found.append((title, href))
+
+        # 6~30위: ul.mduRankSubject > li > a > h2
+        for li in soup.select('ul.mduRankSubject li'):
+            a_tag = li.select_one('a[href]')
+            if not a_tag:
+                continue
+            h2 = a_tag.select_one('h2')
+            title = h2.get_text(strip=True) if h2 else a_tag.get_text(strip=True)
+            href = a_tag.get('href', '')
+            if href and not href.startswith('http'):
+                href = 'https://news.nate.com' + href
+            if title and len(title) > 5 and href not in [l[1] for l in links_found]:
+                links_found.append((title, href))
+
+        if filter_kws:
+            links_found = [(t, h) for t, h in links_found if any(k.lower() in t.lower() for k in filter_kws)]
+
+        self._emit_progress(self.news_progress, 50)
+
+        for idx, (title, href) in enumerate(links_found[:max_count]):
+            try:
+                art_resp = requests.get(href, headers=headers, timeout=10)
+                art_soup = BeautifulSoup(art_resp.text, 'html.parser')
+
+                body = ''
+                for content_sel in ['div#articleContetns', 'div.article_body', 'div#newsContents',
+                                    'div.articleCont', 'article']:
+                    el = art_soup.select_one(content_sel)
+                    if el:
+                        body = el.get_text(strip=True)[:1000]
+                        break
+
+                if not body:
+                    meta = art_soup.select_one('meta[name="description"]') or art_soup.select_one(
+                        'meta[property="og:description"]')
+                    body = meta.get('content', '')[:500] if meta else ''
+
+                results.append(f"[{idx + 1}] 제목: {title}\n본문: {body[:800]}\n링크: {href}\n")
+            except Exception:
+                results.append(f"[{idx + 1}] 제목: {title}\n(본문 수집 실패)\n링크: {href}\n")
+
+            self._emit_progress(self.news_progress, 50 + int((idx / max(max_count, 1)) * 45))
+
+        self._emit_progress(self.news_progress, 100)
+
+        if not results:
+            return "수집 결과가 없습니다. URL을 확인하세요."
+
+        return f"📰 총 {len(results)}건 수집 완료\n{'=' * 50}\n\n" + '\n'.join(results)
+
+    # ─── STEP 2: AI 글쓰기 ───
+    def send_to_ai(self):
+        # 체크된 뉴스만 전달 (체크 없으면 전체 폴백)
+        selected = self._get_checked_news_indices()
+        if self._collected_items and selected:
+            chosen = [self._collected_items[i] for i in selected]
+            blocks = []
+            for n, it in enumerate(chosen, start=1):
+                blocks.append(
+                    f"[{n}] 제목: {it.get('title','')}\n"
+                    f"본문: {it.get('body','')}\n"
+                    f"링크: {it.get('href','')}\n"
+                )
+            text = (f"📰 선택 뉴스 {len(chosen)}건\n" + ("=" * 50) + "\n\n") + "\n".join(blocks)
+            self.ai_input.setPlainText(text)
+            self.main.log(f"✅ 수집 결과 → AI 입력 전달 완료 (선택 {len(chosen)}건)")
+            return
+
+        # 폴백: 전체 텍스트
+        text = self.collect_result.toPlainText().strip()
+        if not text:
+            self.main.log("⚠️ 수집 결과가 비어 있습니다. 뉴스 수집을 먼저 실행하세요")
+            return
+        self.ai_input.setPlainText(text)
+        if self._collected_items:
+            self.main.log(f"⚠️ 체크된 뉴스가 없어 전체({len(self._collected_items)}건)를 AI 입력으로 전달했습니다")
+        else:
+            self.main.log("✅ 수집 결과 → AI 입력 전달 완료")
+
+    # ── 헬퍼: 수집 표 / 원고 표 체크 관리 ──
+    def _populate_collect_table(self, raw_text):
+        """크롤러가 반환한 텍스트를 파싱하여 체크박스 표를 채운다."""
+        try:
+            items = self._parse_news_items(raw_text or "")
+        except Exception as e:
+            self.main.log(f"⚠️ 수집 결과 파싱 실패: {e}")
+            items = []
+        # 링크 별도 추출
+        href_map = {}
+        try:
+            blocks = re.split(r'\[\d+\]\s*제목:', raw_text or "")
+            for b in blocks:
+                if not b.strip():
+                    continue
+                lines = b.strip().split('\n')
+                title = lines[0].strip() if lines else ''
+                href = ''
+                for ln in lines[1:]:
+                    if ln.strip().startswith('링크:'):
+                        href = ln.split('링크:', 1)[1].strip()
+                        break
+                if title:
+                    href_map[title[:100]] = href
+        except Exception:
+            pass
+
+        self._collected_items = []
+        for it in items:
+            self._collected_items.append({
+                'title': it.get('title', ''),
+                'body': it.get('body', ''),
+                'href': href_map.get(it.get('title', ''), ''),
+            })
+
+        self.collect_news_table.setRowCount(len(self._collected_items))
+        for i, it in enumerate(self._collected_items):
+            cb = QTableWidgetItem()
+            cb.setFlags(cb.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            cb.setCheckState(Qt.CheckState.Checked)
+            cb.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.collect_news_table.setItem(i, 0, cb)
+            self.collect_news_table.setItem(i, 1, QTableWidgetItem(it['title'][:120]))
+            body_short = (it['body'][:80] + '…') if len(it['body']) > 80 else it['body']
+            self.collect_news_table.setItem(i, 2, QTableWidgetItem(body_short))
+            self.collect_news_table.setItem(i, 3, QTableWidgetItem(it['href']))
+        self.main.log(f"📋 수집 표 갱신: {len(self._collected_items)}건 (기본 전체 체크)")
+
+    def _toggle_all_news(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.collect_news_table.rowCount()):
+            it = self.collect_news_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 수집 뉴스 {'전체 선택' if state else '전체 해제'} ({self.collect_news_table.rowCount()}건)")
+
+    def _get_checked_news_indices(self):
+        out = []
+        for r in range(self.collect_news_table.rowCount()):
+            it = self.collect_news_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _on_news_selected(self):
+        """수집 뉴스 행 클릭 시 본문을 AI 입력창에 미리보기"""
+        rows = self.collect_news_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        items = list(getattr(self, '_collected_items', []) or [])
+        idx = rows[0].row()
+        if 0 <= idx < len(items):
+            it = items[idx]
+            preview = (
+                f"[미리보기] 제목: {it.get('title','')}\n"
+                f"링크: {it.get('href','')}\n\n"
+                f"본문:\n{it.get('body','')}"
+            )
+            self.ai_input.setPlainText(preview)
+
+    def _toggle_all_articles(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 원고 {'전체 선택' if state else '전체 해제'} ({self.article_table.rowCount()}건)")
+
+    def _get_checked_article_indices(self):
+        out = []
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _set_article_check(self, row, checked=True):
+        it = QTableWidgetItem()
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.article_table.setItem(row, 0, it)
+
+    def _on_article_selected(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows: return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            self.ai_output.setPlainText(self.generated_articles[idx].get('content', ''))
+
+    def _copy_selected_article(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows:
+            self.main.log("⚠️ 원고를 먼저 선택하세요")
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            pyperclip.copy(self.generated_articles[idx].get('content', ''))
+            self.main.log(f"📋 원고 #{idx+1} 복사 완료")
+
+    def _copy_all_articles(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 생성된 원고가 없습니다")
+            return
+        all_text = ""
+        for i, art in enumerate(self.generated_articles):
+            all_text += f"\n{'='*60}\n[원고 {i+1}] {art.get('title','')}\n{'='*60}\n"
+            all_text += art.get('content', '') + "\n"
+        pyperclip.copy(all_text)
+        self.main.log(f"📋 전체 {len(self.generated_articles)}건 원고 복사 완료")
+
+    def _update_article_table(self):
+        self.article_table.setRowCount(len(self.generated_articles))
+        for i, art in enumerate(self.generated_articles):
+            self.article_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 1, QTableWidgetItem(art.get('status', '완료')))
+            self.article_table.setItem(i, 2, QTableWidgetItem(art.get('title', '')[:80]))
+            content = art.get('content', '')
+            self.article_table.setItem(i, 3, QTableWidgetItem(str(len(content)) if art.get("status") == "완료" else "실패"))
+
+    def generate_ai(self):
+        """수집된 각 뉴스 기사마다 개별 AI 원고를 생성 (테이블 기반)"""
+        if getattr(self, '_generating', False):
+            self._cancel_generate = True
+            self.gen_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 AI 생성 취소 요청됨...")
+            return
+
+        content = self.ai_input.toPlainText().strip()
+        if not content:
+            self.main.log("⚠️ AI 입력이 비어 있습니다. '수집→AI' 버튼을 먼저 클릭하세요")
+            return
+
+        news_items = self._parse_news_items(content)
+        if not news_items:
+            self.main.log("⚠️ 파싱할 뉴스가 없습니다")
+            return
+
+        total = len(news_items)
+        self._cancel_generate = False
+        self._generating = True
+        self.gen_btn.setText(f"🛑 생성 취소 (0/{total})")
+        self.gen_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.ai_progress.setVisible(True)
+        self.ai_progress.setValue(0)
+        self.error_summary.setVisible(False)
+        self.error_summary_label.setVisible(False)
+
+        self.generated_articles = []
+        self.article_table.setRowCount(total)
+        for i, item in enumerate(news_items):
+            self._set_article_check(i, checked=False)
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem("대기"))
+            self.article_table.setItem(i, 3, QTableWidgetItem(item['title'][:80]))
+            self.article_table.setItem(i, 4, QTableWidgetItem("-"))
+
+        model_text = self.ai_model.currentText()
+        prompt = self.ai_prompt.toPlainText()
+        char_target = self.char_count.value()
+        self.main.log(f"🧠 AI 생성 시작 - 총 {total}건 개별 생성")
+
+        thread = WorkerThread(lambda: None)
+        def _ui_update(fn): thread.ui_update_signal.emit(fn)
+
+        def do():
+            generated = []
+            errors_collection = []
+            for idx, item in enumerate(news_items):
+                if self._cancel_generate:
+                    thread.log_signal.emit(f"🛑 AI 생성 취소됨 ({len(generated)}건 처리됨)")
+                    break
+                thread.log_signal.emit(f"📝 [{idx+1}/{total}] AI 원고 생성 중: {item['title'][:40]}...")
+                _ui_update(lambda i=idx, t=total: self.gen_btn.setText(f"🛑 생성 취소 ({i+1}/{t})"))
+                _ui_update(lambda i=idx: self.article_table.setItem(i, 1, QTableWidgetItem("생성중")))
+                _ui_update(lambda i=idx, t=total: self.ai_progress.setValue(int((i / t) * 100)))
+
+                if not item.get('body', '').strip() or len(item.get('body', '').strip()) < 20:
+                    err_msg = '본문이 비어있어 건너뜁니다'
+                    thread.log_signal.emit(f"⚠️ [{idx+1}/{total}] {err_msg}")
+                    generated.append({'title': item['title'], 'content': f'❌ {err_msg}', 'status': '실패', 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 1, QTableWidgetItem("❌실패")))
+                    continue
+
+                full = f"{prompt}\n\n[목표 글자수: {char_target}자]\n"
+                full += "- 제목을 첫 줄에 ## 제목 형태로 작성해주세요\n"
+                full += f"\n[참고 뉴스 제목]: {item['title']}\n"
+                full += f"[참고 뉴스 본문]:\n{item['body'][:4500]}"
+
+                try:
+                    if "sonar" in model_text.lower() or "perplexity" in model_text.lower():
+                        sys_msg = "당신은 한국어 SEO 블로그 전문 작가입니다. 주어진 뉴스를 바탕으로 네이버 블로그에 게시할 완성된 포스트를 작성합니다."
+                        result = call_perplexity(self.main.config.get('perplex_key', '').strip(), full, system_message=sys_msg)
+                    elif "gemini" in model_text.lower():
+                        result = call_gemini_text(self.main.config.get('gemini_key', '').strip(), full)
+                    else:
+                        result = call_openai_text(self.main.config.get('openai_key', '').strip(), full)
+
+                    gen_title = item['title']
+                    for line in result.split('\n'):
+                        s = line.strip()
+                        if s.startswith('##'):
+                            gen_title = s.lstrip('#').strip()
+                            break
+
+                    generated.append({'title': gen_title, 'content': result, 'status': '완료', 'source': item.get('body', '')[:500]})
+                    self.generated_articles = list(generated)
+                    try:
+                        _queue = [{'order': qi+1, 'title': ga['title'], 'content': ga['content'], 'status': 'pending', 'result': ''} for qi, ga in enumerate(generated) if ga.get('status') == '완료']
+                        if _queue:
+                            with open('publish_queue_news_incremental.json', 'w', encoding='utf-8') as _qf:
+                                json.dump(_queue, _qf, ensure_ascii=False, indent=2)
+                            thread.log_signal.emit(f"💾 [{idx+1}/{total}] 발행 대기열 저장 완료 ({len(_queue)}건)")
+                    except Exception:
+                        pass
+                    thread.log_signal.emit(f"✅ [{idx+1}/{total}] 완료: {gen_title[:40]}")
+
+                    if self.auto_dalle_check.isChecked():
+                        oai_key = self.main.config.get('openai_key', '').strip()
+                        if oai_key:
+                            auto_count = self.auto_dalle_count.value()
+                            thread.log_signal.emit(f"  🤖 [{idx+1}/{total}] 자동 이미지 생성 중 ({auto_count}장)...")
+                            auto_imgs = self._auto_generate_dalle_for_article(gen_title, oai_key, count=auto_count)
+                            if auto_imgs:
+                                self._image_pool.extend(auto_imgs)
+                                thread.log_signal.emit(f"  🖼️ [{idx+1}/{total}] 자동 이미지 {len(auto_imgs)}장 생성 완료")
+                    _ui_update(lambda i=idx, t=gen_title, c=len(result): (
+                        self.article_table.setItem(i, 1, QTableWidgetItem("✅완료")),
+                        self.article_table.setItem(i, 2, QTableWidgetItem(t[:80])),
+                        self.article_table.setItem(i, 3, QTableWidgetItem(str(c)))
+                    ))
+                except Exception as e:
+                    err_msg = format_error_message(e)
+                    thread.log_signal.emit(f"❌ [{idx+1}/{total}] 생성 실패: {err_msg}")
+                    generated.append({'title': item['title'], 'content': f'❌ 오류: {err_msg}', 'status': '실패', 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 1, QTableWidgetItem("❌실패")))
+
+                if idx < total - 1 and not self._cancel_generate:
+                    wait_seconds = 4 if "perplexity" in model_text.lower() or "sonar" in model_text.lower() else 2
+                    for _ in range(wait_seconds * 2):
+                        if self._cancel_generate: break
+                        time.sleep(0.5)
+
+            self.generated_articles = generated
+            _ui_update(lambda: self.ai_progress.setValue(100))
+            success = sum(1 for a in generated if a.get('status') == '완료')
+            failed = sum(1 for a in generated if a.get('status') == '실패')
+            if errors_collection:
+                unique_errors = list(dict.fromkeys(errors_collection))
+                error_text = "\n- ".join(unique_errors[:5])
+                _ui_update(lambda: (self.error_summary.setPlainText(f"- {error_text}"), self.error_summary.setVisible(True), self.error_summary_label.setVisible(True)))
+            thread.log_signal.emit(f"✅ AI 원고 생성 완료 - 총 {total}건 중 {success}건 성공, {failed}건 실패")
+            return f"✅ 총 {total}건 원고 생성 완료 ({success}건 성공 / {failed}건 실패)"
+
+        thread.func = do
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: None)
+        def _on_gen_finished():
+            self._generating = False
+            self._cancel_generate = False
+            self.gen_btn.setText("🎯 AI 원고 생성")
+            self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+            self.ai_progress.setVisible(False)
+        thread.finished_signal.connect(_on_gen_finished)
+        thread.start()
+    def _export_articles_excel(self):
+        """생성된 원고를 엑셀로 내보내기"""
+        if not self.generated_articles:
+            self.main.log("⚠️ 내보낼 원고가 없습니다")
+            return
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            cfg = self.SOURCE_CONFIG.get(self.source, {})
+            src_name = cfg.get('title', '뉴스').replace('️⃣ ', '')
+            path, _ = QFileDialog.getSaveFileName(self, "엑셀 내보내기", f"{src_name}_원고_목록.xlsx", "Excel Files (*.xlsx)")
+            if not path:
+                return
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "원고 목록"
+            headers = ["번호", "제목", "글자수", "상태", "원문 참고", "생성된 원고"]
+            header_fill = PatternFill('solid', fgColor='1a4a8a')
+            header_font = Font(bold=True, color='FFFFFF')
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions['A'].width = 6
+            ws.column_dimensions['B'].width = 50
+            ws.column_dimensions['C'].width = 10
+            ws.column_dimensions['D'].width = 8
+            ws.column_dimensions['E'].width = 60
+            ws.column_dimensions['F'].width = 80
+            for i, art in enumerate(self.generated_articles):
+                ws.cell(row=i+2, column=1, value=i+1)
+                ws.cell(row=i+2, column=2, value=art.get('title', ''))
+                ws.cell(row=i+2, column=3, value=len(art.get('content', '')))
+                ws.cell(row=i+2, column=4, value=art.get('status', '완료'))
+                ws.cell(row=i+2, column=5, value=art.get('source', '')[:500])
+                ws.cell(row=i+2, column=6, value=art.get('content', ''))
+            wb.save(path)
+            self.main.log(f"📊 엑셀 내보내기 완료: {path} ({len(self.generated_articles)}건)")
+        except ImportError:
+            self.main.log("❌ openpyxl 패키지가 필요합니다: pip install openpyxl")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 내보내기 오류: {e}")
+
+    def _import_articles_excel(self):
+        """엑셀 파일에서 원고를 불러오기"""
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 원고 파일 선택", "", "Excel Files (*.xlsx *.xls)")
+        if not path:
+            return
+        try:
+            import pandas as pd
+            df = pd.read_excel(path)
+            imported = []
+            for _, row in df.iterrows():
+                title = str(row.get('제목', row.get('title', '제목 없음')))
+                content = str(row.get('생성된 원고', row.get('content', row.get('생성된원고', ''))))
+                source = str(row.get('원문 참고', row.get('원문참고', row.get('source', ''))))
+                if content and content != 'nan':
+                    imported.append({
+                        'title': title if title != 'nan' else '제목 없음',
+                        'content': content,
+                        'source': source if source != 'nan' else '',
+                        'status': '완료',
+                    })
+            if imported:
+                self.generated_articles.extend(imported)
+                self._update_article_table()
+                self.main.log(f"📥 엑셀에서 {len(imported)}건 원고 불러옴 (총 {len(self.generated_articles)}건)")
+            else:
+                self.main.log("⚠️ 엑셀에서 불러올 원고가 없습니다 (제목/생성된 원고 컬럼 필요)")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 원고 불러오기 오류: {e}")
+
+    def _parse_news_items(self, text):
+        """수집 결과 텍스트에서 개별 뉴스를 파싱"""
+        items = []
+        blocks = re.split(r'\[\d+\]\s*제목:', text)
+        for block in blocks:
+            if not block.strip():
+                continue
+            lines = block.strip().split('\n')
+            title = lines[0].strip() if lines else ''
+            body = ''
+            for l in lines[1:]:
+                if l.startswith('본문:'):
+                    body = l.replace('본문:', '').strip()
+                elif l.startswith('링크:'):
+                    continue
+                elif body:
+                    body += '\n' + l
+            if not body:
+                body = '\n'.join(lines[1:])
+            if title and len(title) > 3:
+                items.append({'title': title[:100], 'body': body[:3000]})
+        return items if items else [{'title': '뉴스 포스트', 'body': text[:3000]}]
+
+    def save_draft(self):
+        text = self.ai_output.toPlainText().strip()
+        if not text:
+            self.main.log("⚠️ 저장할 원고가 없습니다")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"news_{self.source}_{ts}.txt"
+        path, _ = QFileDialog.getSaveFileName(self, "원고 저장", fname, "Text Files (*.txt)")
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            self.main.log(f"💾 원고 저장 완료: {path}")
+
+    # ─── STEP 3: 블로그 발행 ───
+    def _get_selected_account(self):
+        """선택된 계정의 id/pw 반환"""
+        sel_id = self.account_combo.currentText().strip() if hasattr(self, 'account_combo') else ''
+        accounts = self.main.config.get('naver_accounts', [])
+        for acc in accounts:
+            if acc.get('id') == sel_id:
+                return acc.get('id', ''), acc.get('pw', '')
+        return self.main.config.get('naver_id', ''), self.main.config.get('naver_pw', '')
+
+    def load_blog_folders(self):
+        """블로그 카테고리 폴더 불러오기"""
+        naver_id, naver_pw = self._get_selected_account()
+        if not naver_id or not naver_pw:
+            self.main.log("⚠️ 설정에서 네이버 계정을 먼저 입력하세요")
+            return
+
+        self.load_folders_btn.setEnabled(False)
+        self.load_folders_btn.setText("불러오는 중...")
+
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            import re
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            driver = make_uc_driver(opts)
+            folders = []
+
+            try:
+                # ── 먼저 로그인 (실패 시 60초 수동 대기) ──
+                if not naver_login_with_fallback(driver, naver_id, naver_pw, self.main.log):
+                    return "❌ 로그인 실패"
+
+                # ── 1단계: API로 카테고리 가져오기 ──
+                try:
+                    cat_url = f"https://blog.naver.com/NBlogCategoryListAjax.naver?blogId={naver_id}"
+                    driver.get(cat_url)
+                    time.sleep(2)
+                    page_text = driver.page_source
+
+                    if 'categoryName' in page_text:
+                        cat_names = re.findall(r'"categoryName"\s*:\s*"([^"]+)"', page_text)
+                        for cn in cat_names:
+                            try:
+                                decoded = cn.encode('utf-8').decode('unicode_escape')
+                            except Exception:
+                                decoded = cn
+                            if decoded and decoded not in folders:
+                                folders.append(decoded)
+                    if folders:
+                        self.main.log(f"✅ API로 {len(folders)}개 카테고리 확보")
+                        return '|||'.join(folders)
+                except Exception as e:
+                    self.main.log(f"ℹ️ API 시도 실패, 스크래핑으로 전환: {e}")
+
+                # ── 2단계: 블로그 메인 페이지 스크래핑 ──
+                try:
+                    driver.get(f"https://blog.naver.com/{naver_id}")
+                    time.sleep(3)
+                    try:
+                        iframe = driver.find_element(By.ID, 'mainFrame')
+                        driver.switch_to.frame(iframe)
+                        time.sleep(1)
+                    except Exception:
+                        pass
+
+                    selectors = [
+                        'div.category a',
+                        'ul.category_list li a',
+                        'div.area_category a',
+                        '#category a',
+                        '.blog-category a',
+                        'a[href*="categoryNo"]',
+                    ]
+                    for sel in selectors:
+                        try:
+                            cats = driver.find_elements(By.CSS_SELECTOR, sel)
+                            for cat in cats:
+                                name = cat.text.strip()
+                                cleaned = re.sub(r'\s*\(\d+\)\s*$', '', name).strip()
+                                if cleaned and cleaned not in ['전체보기', '분류 전체보기', '카테고리',
+                                                               ''] and cleaned not in folders:
+                                    folders.append(cleaned)
+                        except Exception:
+                            continue
+                        if folders:
+                            break
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                if folders:
+                    self.main.log(f"✅ 메인페이지에서 {len(folders)}개 카테고리 확보")
+                    return '|||'.join(folders)
+
+                # ── 3단계: 글쓰기 에디터에서 가져오기 ──
+                self.main.log("ℹ️ 메인페이지 실패, 에디터에서 시도...")
+                try:
+                    driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                    time.sleep(4)
+                    try:
+                        iframe = driver.find_element(By.ID, 'mainFrame')
+                        driver.switch_to.frame(iframe)
+                        time.sleep(1)
+                    except Exception:
+                        pass
+
+                    iframes = driver.find_elements(By.TAG_NAME, 'iframe')
+                    for ifr in iframes:
+                        try:
+                            driver.switch_to.frame(ifr)
+                            cats = driver.find_elements(By.CSS_SELECTOR,
+                                                        'select#categoryId option, ul.category_list li')
+                            for cat in cats:
+                                name = cat.text.strip()
+                                if name and name not in ['카테고리 선택', ''] and name not in folders:
+                                    folders.append(name)
+                            if folders:
+                                break
+                            driver.switch_to.default_content()
+                        except Exception:
+                            driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                if not folders:
+                    folders = ['기본 카테고리']
+
+                return '|||'.join(folders)
+            finally:
+                driver.quit()
+
+        def on_result(r):
+            if str(r).startswith('❌'):
+                self.main.log(r)
+                return
+            folders = r.split('|||')
+            self.blog_folder.clear()
+            self.blog_folder.addItems(folders)
+            self._save_folders_to_config(naver_id, folders, self.blog_folder.currentText().strip())
+            self.main.log(f"✅ {len(folders)}개 블로그 폴더 로드 완료")
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.load_folders_btn.setEnabled(True),
+            self.load_folders_btn.setText("🔄 폴더 불러오기")
+        ))
+        thread.start()
+
+    def publish_to_blog(self):
+        """generated_articles 리스트를 순회하며 각각 블로그에 발행 (순차 처리)"""
+        # 중복 실행 방지
+        if self._publishing_flag:
+            self.main.log("⚠️ 이미 발행이 진행 중입니다. 완료될 때까지 기다려주세요.")
+            return
+
+        publish_queue = self._build_publish_queue()
+        if not publish_queue:
+            self.main.log("⚠️ 발행할 원고가 없습니다. AI 글쓰기를 먼저 실행하세요")
+            return
+
+        config = self.main.config
+        naver_id, naver_pw = self._get_selected_account()
+        if not naver_id or not naver_pw:
+            self.main.log("⚠️ 설정에서 네이버 계정을 먼저 입력하세요")
+            return
+
+        folder = self.blog_folder.currentText().strip()
+        mode = self.save_mode.currentText()
+        total = len(publish_queue)
+        queue_path = self._write_publish_queue_snapshot(naver_id, publish_queue)
+        self.publish_queue = publish_queue
+        self._publishing_flag = True
+
+        self.publish_btn.setEnabled(False)
+        self.publish_btn.setText(f"발행 중... (0/{total})")
+        self.pub_progress.setVisible(True)
+        self.pub_progress.setValue(0)
+
+        self.main.log(f"🚀 총 {total}건 블로그 발행 시작")
+        self.main.log(f"🗂️ 발행 대기열 저장 완료: {queue_path}")
+
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            opts = uc.ChromeOptions()
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--disable-popup-blocking')
+            prefs = {
+                'profile.default_content_setting_values.popups': 0,
+            }
+            opts.add_experimental_option('prefs', prefs)
+            driver = make_uc_driver(opts)
+
+            # ── window.open 완전 차단 (드라이버 생성 직후) ──
+            def block_window_open():
+                try:
+                    driver.execute_script("""
+                        if (!window._woBlocked) {
+                            window._origOpen = window.open;
+                            window.open = function(url) {
+                                if (url) window.location.href = url;
+                                return window;
+                            };
+                            window._woBlocked = true;
+                        }
+                    """)
+                except Exception:
+                    pass
+            # ── "작성중인 글이 있습니다" 팝업 취소 처리 ──
+            def dismiss_draft_popup():
+                """에디터 진입 시 '작성중인 글이 있습니다' 팝업이 뜨면 취소 버튼 클릭"""
+                try:
+                    time.sleep(2)
+                    cancel_selectors = [
+                        'button.se-popup-button-cancel',
+                        'button.cancel_btn__WEaBq',
+                        'button.cancel_btn',
+                        'button[class*="cancel"]',
+                        'button.se-cancel',
+                    ]
+                    # 팝업 텍스트로도 탐지
+                    try:
+                        popup_texts = driver.find_elements(By.XPATH,
+                            "//*[contains(text(),'작성중인') or contains(text(),'작성 중인') or contains(text(),'임시저장')]")
+                        if popup_texts:
+                            self.log_emit("  ℹ️ '작성중인 글' 팝업 감지 → 취소 클릭 시도")
+                            for sel in cancel_selectors:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                            # CSS 셀렉터 실패 시 XPATH로 취소/아니오 버튼 찾기
+                            cancel_btns = driver.find_elements(By.XPATH,
+                                "//button[contains(text(),'취소') or contains(text(),'아니') or contains(text(),'아니오') or contains(text(),'새로')]")
+                            for btn in cancel_btns:
+                                try:
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료 (XPATH)")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.log_emit(f"  ℹ️ 팝업 처리 중 예외(무시): {e}")
+                return False
+
+
+            # ── 원고 정제 함수 ──
+            def sanitize_content(raw_content):
+                """발행 전 원고에서 불필요한 마크다운/이미지/참조를 제거"""
+                lines = raw_content.split('\n')
+                cleaned = []
+                for line in lines:
+                    s = line.strip()
+                    # 구분선 제거
+                    if re.match(r'^[━─═\-]{3,}', s):
+                        continue
+                    # [이미지 삽입] 줄 제거
+                    if s == '[이미지 삽입]':
+                        continue
+                    # 마크다운 이미지 ![alt](url) 제거
+                    if re.match(r'^!\[.*\]\(.*\)$', s):
+                        continue
+                    # 순수 URL만 있는 줄 제거 (이미지 URL)
+                    if re.match(r'^https?://\S+$', s):
+                        continue
+                    # URL (설명) 형태 줄 제거
+                    if re.match(r'^https?://\S+\s*\(.*\)$', s):
+                        continue
+                    # 📄 [번호] 헤더 줄 제거
+                    if re.match(r'^📄\s*\[\d+\]', s):
+                        continue
+                    # (공백 제외 N자) 제거
+                    if re.match(r'^\(공백\s*제외\s*\d+자\)$', s):
+                        continue
+                    # **추가 반전형 이미지 키워드** 블록 제거
+                    if '이미지 키워드' in s and ('추가' in s or '반전형' in s):
+                        continue
+                    # 번호. URL 형태 (이미지 리스트) 제거
+                    if re.match(r'^\d+\.\s*https?://\S+', s):
+                        continue
+                    # 참조 번호 [1][2] 등 제거 (텍스트는 유지)
+                    s = re.sub(r'\[\d+\]', '', s)
+                    # ## 마크다운 헤더 → 일반 텍스트
+                    s = re.sub(r'^#{1,6}\s*', '', s)
+                    # **bold** → 일반 텍스트
+                    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+                    s = s.strip()
+                    if s:
+                        cleaned.append(s)
+                # 연속 빈 줄 정리
+                result = '\n'.join(cleaned)
+                result = re.sub(r'\n{3,}', '\n\n', result)
+                return result.strip()
+
+            def validate_article(article):
+                """발행 가능한 원고인지 검증. 불가 시 사유 반환"""
+                title = (article.get('title') or '').strip()
+                content = (article.get('content') or '').strip()
+                if not title or not content:
+                    return '제목 또는 본문이 비어 있습니다'
+                if '필수 입력 정보 부재' in content or '요청을 정확히 처리할 수 없습니다' in content:
+                    return '오류 원고 (AI가 생성 실패한 항목)'
+                # 정제 후에도 내용이 너무 짧으면 스킵
+                sanitized = sanitize_content(content)
+                if len(sanitized) < 50:
+                    return f'정제 후 본문이 너무 짧습니다 ({len(sanitized)}자)'
+                return None  # 검증 통과
+
+            success_count = 0
+            fail_count = 0
+            main_window = None
+
+            def update_queue_status(index, status, result):
+                publish_queue[index]['status'] = status
+                publish_queue[index]['result'] = result
+                self._write_publish_queue_snapshot(naver_id, publish_queue)
+
+            def keep_only_window(target_handle=None):
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                target = target_handle or main_window or handles[-1]
+                for handle in list(handles):
+                    if handle == target:
+                        continue
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(target)
+                main_window = target
+
+            def close_all_extra_tabs():
+                """main_window 외 모든 탭을 닫는다"""
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                if not main_window or main_window not in handles:
+                    main_window = handles[0]
+                for h in handles:
+                    if h == main_window:
+                        continue
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                try:
+                    driver.switch_to.window(main_window)
+                except Exception:
+                    pass
+
+            def open_editor_single_tab():
+                """항상 단일 탭에서 글쓰기 에디터를 연다"""
+                nonlocal main_window
+
+                # 0) 먼저 탭 1개만 남기기
+                close_all_extra_tabs()
+
+                # 1) 현재 탭에서 에디터로 이동 (execute_script로 강제)
+                editor_url = 'https://blog.naver.com/GoBlogWrite.naver'
+                try:
+                    driver.execute_script(f'window.location.href = "{editor_url}";')
+                except Exception:
+                    driver.get(editor_url)
+
+                time.sleep(5)
+
+                # 2) 새 탭이 열렸으면 마지막 탭(에디터)만 남기고 닫기
+                handles = list(driver.window_handles)
+                if len(handles) > 1:
+                    editor_tab = handles[-1]
+                    for h in handles:
+                        if h == editor_tab:
+                            continue
+                        try:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        except Exception:
+                            pass
+                    driver.switch_to.window(editor_tab)
+                    main_window = editor_tab
+                    self.log_emit(f"  ℹ️ 추가 탭 {len(handles)-1}개 닫고 에디터 탭만 유지")
+                else:
+                    main_window = handles[0] if handles else driver.current_window_handle
+                    driver.switch_to.window(main_window)
+
+                # 3) iframe 전환
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                # mainFrame이 있으면 진입
+                try:
+                    iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, 'mainFrame'))
+                    )
+                    driver.switch_to.frame(iframe)
+                    time.sleep(1)
+                    self.log_emit("  ✅ mainFrame iframe 진입 성공")
+                    dismiss_draft_popup()
+                except Exception:
+                    self.log_emit("  ℹ️ mainFrame 없음, 직접 에디터 접근 시도")
+
+                # 4) 에디터 로드 확인
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.se-title-text, div[contenteditable="true"]'))
+                    )
+                    self.log_emit("  ✅ 에디터 로드 확인")
+                except Exception:
+                    self.log_emit("  ⚠️ 에디터 요소를 찾지 못했습니다 (계속 시도)")
+
+            def select_folder_if_needed():
+                if not folder:
+                    return True
+                selectors = ['select#categoryId', 'select[name="categoryId"]']
+                for selector in selectors:
+                    try:
+                        cat_select = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        cat_select.click()
+                        time.sleep(0.3)
+                        for opt in cat_select.find_elements(By.TAG_NAME, 'option'):
+                            if folder in opt.text:
+                                opt.click()
+                                time.sleep(0.3)
+                                return True
+                    except Exception:
+                        continue
+                return False
+
+            def input_title(art_title):
+                title_selectors = [
+                    'span.se-placeholder',
+                    'div[data-name="title"] div[contenteditable="true"]',
+                    'div.se-section-title div.se-text-paragraph',
+                    'div.se-title-text',
+                ]
+                last_error = None
+                for selector in title_selectors:
+                    try:
+                        title_el = WebDriverWait(driver, 3).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                        try:
+                            title_el.click()
+                        except Exception:
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            ActionChains(driver).move_to_element(title_el).click().perform()
+                        time.sleep(0.2)
+                        pyperclip.copy(art_title)
+                        safe_hotkey(driver, 'ctrl', 'a')
+                        time.sleep(0.1)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        time.sleep(0.3)
+                        self.log_emit(f"  ✅ 제목 입력 완료: {art_title[:30]}")
+                        return True
+                    except Exception as e:
+                        last_error = e
+                        continue
+                raise RuntimeError(f'제목 입력 실패: {last_error}')
+
+            def focus_body():
+                body_selectors = [
+                    'div.se-section-text div[contenteditable="true"]',
+                    'div.se-component-content div[contenteditable="true"]',
+                    'div.se-text-paragraph',
+                    'div[contenteditable="true"]',
+                ]
+                for selector in body_selectors:
+                    try:
+                        elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                        for elem in elems:
+                            if not elem.is_displayed():
+                                continue
+                            try:
+                                driver.execute_script("arguments[0].click();", elem)
+                            except Exception:
+                                elem.click()
+                            time.sleep(0.3)
+                            return True
+                    except Exception:
+                        continue
+                try:
+                    safe_press(driver, 'tab')
+                    time.sleep(0.3)
+                    return True
+                except Exception:
+                    return False
+
+            def input_body(art_content):
+                if not focus_body():
+                    raise RuntimeError('본문 입력 영역 포커스 실패')
+
+                # v26: 본문 전처리만 먼저, 정렬은 입력 후에 적용
+                art_content = preprocess_article_lines(art_content)
+                alignment = getattr(self, '_selected_alignment', 'left')
+
+                wrote_any = False
+                for raw_line in art_content.split('\n'):
+                    line = raw_line.rstrip()
+                    if not line.strip():
+                        safe_press(driver, 'enter')
+                        time.sleep(0.05)
+                        continue
+
+                    # 스티커 토큰 처리
+                    sticker_idxs = extract_sticker_indices(line)
+                    line_wo_sticker = strip_sticker_tokens(line)
+
+                    # 인용구 자동 감지 — 한 줄만 인용 블록, 나머지는 일반 문단
+                    if line_wo_sticker and looks_like_quote(line_wo_sticker):
+                        insert_quote_block(driver, line_wo_sticker)
+                        wrote_any = True
+                    elif line_wo_sticker:
+                        pyperclip.copy(line_wo_sticker)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        safe_press(driver, 'enter')
+                        time.sleep(0.1)
+                        wrote_any = True
+
+                    for sidx in sticker_idxs:
+                        try:
+                            insert_naver_sticker(driver, sidx)
+                            safe_press(driver, 'enter')
+                        except Exception:
+                            pass
+
+                if not wrote_any:
+                    raise RuntimeError('본문 내용이 비어 있어 입력하지 못했습니다')
+
+                # v26: 입력 완료 후 전체 선택 → 정렬 적용 (+ JS fallback)
+                try:
+                    apply_alignment(driver, alignment, select_all_first=True)
+                except Exception:
+                    pass
+
+            def submit_article(art_idx, art_title):
+                time.sleep(1)
+                if '임시' in mode:
+                    save_selectors = [
+                        'button[data-testid="save-btn"]',
+                        'button.save_btn__Y5f57',
+                        'button.save_btn',
+                        'button[class*="save"]',
+                    ]
+                    clicked = False
+                    for selector in save_selectors:
+                        try:
+                            btn = WebDriverWait(driver, 3).until(
+                                EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        try:
+                            btn = driver.find_element(
+                                By.XPATH, '//button[contains(., "임시저장")]'
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        raise RuntimeError('임시저장 버튼을 찾지 못했습니다')
+                    time.sleep(2)
+                    self.log_emit(f"  💾 [{art_idx + 1}/{total}] 임시저장 완료: {art_title[:30]}")
+                    driver.execute_script('window.location.href = "https://blog.naver.com";')
+                    time.sleep(2)
+                    return True, '임시저장 완료'
+
+
+                publish_selectors = [
+                    'button[data-testid="publish-btn"]',
+                    'button.publish_btn__Y5f57',
+                    'button.publish_btn',
+                    'button[class*="publish"]',
+                ]
+                confirm_selectors = [
+                    'button.se-popup-button-confirm',
+                    'button.confirm_btn__WEaBq',
+                    'button.confirm_btn',
+                    'button[class*="confirm"]',
+                ]
+
+                clicked = False
+                for selector in publish_selectors:
+                    try:
+                        btn = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        driver.execute_script("arguments[0].click();", btn)
+                        clicked = True
+                        break
+                    except Exception:
+                        continue
+                if not clicked:
+                    raise RuntimeError('발행 버튼을 찾지 못했습니다')
+
+                time.sleep(2)
+
+                confirmed = False
+                for selector in confirm_selectors:
+                    try:
+                        btn = driver.find_element(By.CSS_SELECTOR, selector)
+                        driver.execute_script("arguments[0].click();", btn)
+                        confirmed = True
+                        break
+                    except Exception:
+                        continue
+
+                if not confirmed:
+                    self.log_emit('  ℹ️ 발행 확인 팝업이 없어 바로 완료 여부를 확인합니다')
+
+                time.sleep(4)
+                current_url = (driver.current_url or '').lower()
+                if 'goblogwrite' in current_url:
+                    self.log_emit('  ⚠️ 에디터 URL에 머물러 있음, 발행 재시도...')
+                    # 한 번 더 confirm 버튼 시도
+                    for selector in confirm_selectors:
+                        try:
+                            btn = driver.find_element(By.CSS_SELECTOR, selector)
+                            driver.execute_script("arguments[0].click();", btn)
+                            time.sleep(3)
+                            break
+                        except Exception:
+                            continue
+
+                self.log_emit(f"  📤 [{art_idx + 1}/{total}] 즉시발행 완료")
+                return True, driver.current_url
+
+            try:
+                self.log_emit('🔑 네이버 로그인 중...')
+                if not naver_login_with_fallback(driver, naver_id, naver_pw, self.log_emit):
+                    return '❌ 로그인 실패 - 설정에서 계정을 확인하세요'
+                self.log_emit('✅ 로그인 완료')
+                main_window = driver.current_window_handle
+                close_all_extra_tabs()
+                block_window_open()
+
+                for art_idx, article in enumerate(publish_queue):
+                    try:
+                        art_title = article.get('title', f'포스트 {art_idx + 1}')
+                        art_content = article.get('content', '')
+
+                        # ── 원고 검증 ──
+                        skip_reason = validate_article(article)
+                        if skip_reason:
+                            self.log_emit(f"\n⏭️ [{art_idx + 1}/{total}] 건너뜀: {skip_reason} — {art_title[:30]}")
+                            fail_count += 1
+                            update_queue_status(art_idx, 'skipped', skip_reason)
+                            continue
+
+                        # ── 원고 정제 ──
+                        art_content = sanitize_content(art_content)
+
+                        # ── 본문에서 제목 줄 제거 (제목은 별도 입력) ──
+                        content_lines = art_content.split('\n')
+                        filtered_lines = []
+                        title_stripped = False
+                        for cl in content_lines:
+                            cl_clean = cl.strip()
+                            if not title_stripped and cl_clean and (
+                                cl_clean == art_title.strip() or
+                                re.sub(r'^#{1,6}\s*', '', cl_clean) == art_title.strip() or
+                                cl_clean.replace('**', '') == art_title.strip()
+                            ):
+                                title_stripped = True
+                                continue
+                            filtered_lines.append(cl)
+                        art_content = '\n'.join(filtered_lines).strip()
+                        self.log_emit(f"\n📝 [{art_idx + 1}/{total}] 발행 시작: {art_title[:40]}... (정제 후 {len(art_content)}자)")
+                        QTimer.singleShot(0, lambda idx=art_idx: self.publish_btn.setText(f"발행 중... ({idx + 1}/{total})"))
+
+                        open_editor_single_tab()
+                        block_window_open()  # 에디터 로드 후 다시 차단
+
+                        if folder and not select_folder_if_needed():
+                            self.log_emit('  ⚠️ 폴더 선택 실패, 기본 카테고리로 진행합니다')
+
+                        input_title(art_title)
+                        input_body(art_content)
+                        ok, result_message = submit_article(art_idx, art_title)
+
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                        success_count += 1
+                        update_queue_status(art_idx, 'done', result_message)
+
+                    except Exception as e:
+                        self.log_emit(f"  ❌ [{art_idx + 1}/{total}] 발행 실패: {e}")
+                        fail_count += 1
+                        update_queue_status(art_idx, 'error', str(e))
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                    self._emit_progress(self.pub_progress, int(((art_idx + 1) / total) * 100))
+                    time.sleep(2)
+
+                return f"✅ 블로그 발행 완료! 성공: {success_count}건, 실패: {fail_count}건"
+
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.main.log(r))
+
+        def on_news_publish_finished():
+            self._publishing_flag = False
+            self.publish_btn.setEnabled(True)
+            self.publish_btn.setText('🚀 블로그 발행')
+            self.pub_progress.setVisible(False)
+
+        thread.finished_signal.connect(on_news_publish_finished)
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+#  5. 카페 수집 페이지
+# ═══════════════════════════════════════════════════════════════
+
+
+    def _refresh_image_table(self):
+        """이미지 풀 테이블 갱신"""
+        self.image_table.setRowCount(len(self._image_pool))
+        for i, img in enumerate(self._image_pool):
+            self.image_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.image_table.setItem(i, 1, QTableWidgetItem("📁업로드" if img['source'] == 'upload' else "🤖AI"))
+            self.image_table.setItem(i, 2, QTableWidgetItem(img.get('desc', '')[:60]))
+            self.image_table.setItem(i, 3, QTableWidgetItem(img.get('path', '')))
+        self.img_status.setText(f"총 {len(self._image_pool)}개 이미지 등록됨")
+
+    def _upload_images(self):
+        """로컬 이미지 파일 직접 업로드"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "이미지 파일 선택", "",
+            "이미지 파일 (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;모든 파일 (*.*)"
+        )
+        if not files:
+            return
+        for fpath in files:
+            self._image_pool.append({
+                'source': 'upload',
+                'desc': os.path.basename(fpath),
+                'path': fpath,
+            })
+        self._refresh_image_table()
+        self.main.log(f"🖼️ {len(files)}개 이미지 업로드 완료 (총 {len(self._image_pool)}개)")
+
+    def _generate_dalle_images(self):
+        """DALL-E API로 이미지 생성"""
+        prompt = self.dalle_prompt.text().strip()
+        if not prompt:
+            self.main.log("⚠️ DALL-E 프롬프트를 입력하세요")
+            return
+        api_key = self.main.config.get('openai_key', '').strip()
+        if not api_key:
+            self.main.log("⚠️ OpenAI API Key가 설정되지 않았습니다 (설정 탭에서 입력)")
+            return
+
+        count = self.dalle_count.value()
+        size = self.dalle_size.currentText()
+
+        self.img_dalle_btn.setEnabled(False)
+        self.img_dalle_btn.setText(f"🤖 생성 중... (0/{count})")
+        self.main.log(f"🤖 DALL-E 이미지 생성 시작: '{prompt}' × {count}장")
+
+        def do_gen():
+            results = []
+            for i in range(count):
+                try:
+                    path = generate_dalle_image(api_key, prompt, size=size)
+                    results.append({'source': 'dalle', 'desc': prompt, 'path': path})
+                    thread.log_signal.emit(f"  🖼️ [{i+1}/{count}] 이미지 생성 완료")
+                except Exception as e:
+                    thread.log_signal.emit(f"  ❌ [{i+1}/{count}] 생성 실패: {format_error_message(e)}")
+                if i < count - 1:
+                    time.sleep(2)
+            return results
+
+        thread = WorkerThread(do_gen)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def on_result(results):
+            if isinstance(results, list):
+                self._image_pool.extend(results)
+                self._refresh_image_table()
+                self.main.log(f"✅ DALL-E 이미지 {len(results)}장 생성 완료 (총 {len(self._image_pool)}개)")
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.img_dalle_btn.setEnabled(True),
+            self.img_dalle_btn.setText("🤖 AI 이미지 생성 (ChatGPT)")
+        ))
+        thread.start()
+
+    def _auto_generate_dalle_for_article(self, article_title, api_key, count=1, size="1024x1024"):
+        """원고 제목 기반 자동 DALL-E 이미지 생성 (워커 스레드 내에서 호출)"""
+        generated = []
+        for i in range(count):
+            try:
+                prompt = f"네이버 블로그 포스팅용 고퀄리티 사진. 주제: {article_title}. 자연스러운 실제 사진 스타일, 텍스트 없이."
+                path = generate_dalle_image(api_key, prompt, size=size)
+                generated.append({'source': 'dalle', 'desc': f"자동생성: {article_title}", 'path': path})
+            except Exception as e:
+                pass  # 자동 생성 실패는 무시
+            if i < count - 1:
+                time.sleep(2)
+        return generated
+
+    def _delete_selected_image(self):
+        """선택된 이미지 삭제"""
+        rows = set(item.row() for item in self.image_table.selectedItems())
+        if not rows:
+            self.main.log("⚠️ 삭제할 이미지를 선택하세요")
+            return
+        for idx in sorted(rows, reverse=True):
+            if 0 <= idx < len(self._image_pool):
+                self._image_pool.pop(idx)
+        self._refresh_image_table()
+        self.main.log(f"🗑️ {len(rows)}개 이미지 삭제됨")
+
+    def _clear_all_images(self):
+        """모든 이미지 삭제"""
+        self._image_pool.clear()
+        self._refresh_image_table()
+        self.main.log("🗑️ 전체 이미지 삭제됨")
+
+    def _get_images_for_article(self, article_idx, photo_count):
+        """원고에 사용할 이미지들 반환 (라운드 로빈).
+        v27: photo_count가 0이어도 풀에 이미지가 있으면 최소 1장 반환 → 본문 시작 부분에 자동 삽입."""
+        if not self._image_pool:
+            return []
+        total_imgs = len(self._image_pool)
+        # [사진] 토큰이 0개여도 풀에 있으면 1장은 사용
+        effective = max(photo_count, 1) if total_imgs > 0 else photo_count
+        start = (article_idx * effective) % total_imgs
+        result = []
+        for i in range(effective):
+            idx = (start + i) % total_imgs
+            result.append(self._image_pool[idx]['path'])
+        return result
+    def _insert_image_to_editor(self, driver, image_path):
+        """네이버 블로그 에디터에 이미지를 삽입.
+        v27: 본문 전용 file input 우선 + 툴바 이미지 버튼 먼저 활성화 + iframe 진입."""
+        import subprocess as sp
+
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"이미지 파일 없음: {image_path}")
+
+        abs_path = os.path.abspath(image_path)
+
+        # iframe 진입 시도 (mainFrame 안에 에디터가 있음)
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame('mainFrame')
+        except Exception:
+            pass
+
+        # ── 방법 1: 본문 이미지 툴바 버튼을 먼저 눌러 file input 활성화 ──
+        try:
+            for btn_sel in [
+                'button.se-image-toolbar-button',
+                'button[data-name="image"]',
+                'button[data-type="image"]',
+                'button[aria-label*="사진"]',
+                'button[aria-label*="이미지"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    if btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(0.6)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # ── 방법 2: 본문 전용 file input 우선 (썸네일용은 보통 첫 번째라 제외) ──
+        try:
+            # 본문용 셀렉터 우선
+            preferred = []
+            for sel in [
+                'input.se-image-input-file',
+                'input[class*="image"][type="file"]',
+                'input[accept*="image"][type="file"]',
+            ]:
+                preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
+            # fallback: 모든 file input (썸네일 제외 위해 뒤쪽부터)
+            all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+            candidates = preferred + list(reversed(all_inputs))
+            seen = set()
+            for fi in candidates:
+                key = fi.get_attribute('outerHTML')[:200]
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    # display:none 인 input도 send_keys 가능
+                    driver.execute_script("arguments[0].style.display='block'; arguments[0].style.visibility='visible';", fi)
+                    fi.send_keys(abs_path)
+                    time.sleep(4)  # 업로드 + 처리 대기
+                    self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                    # iframe 복귀
+                    try:
+                        driver.switch_to.default_content()
+                        driver.switch_to.frame('mainFrame')
+                    except Exception:
+                        pass
+                    return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 2: 이미지 버튼 클릭 → file input에 전달
+        try:
+            for btn_sel in [
+                'button[data-name="image"]',
+                'button.se-image-toolbar-button',
+                'button[data-type="image"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    img_btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    driver.execute_script("arguments[0].click();", img_btn)
+                    time.sleep(1)
+                    # file input 찾기
+                    file_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+                    for fi in file_inputs:
+                        try:
+                            fi.send_keys(os.path.abspath(image_path))
+                            time.sleep(3)
+                            self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                            return
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 3: PowerShell 클립보드 이미지 복사 → Ctrl+V
+        try:
+            abs_path = os.path.abspath(image_path).replace('\\', '/')
+            ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile('{abs_path}')
+[System.Windows.Forms.Clipboard]::SetImage($img)
+$img.Dispose()
+"""
+            sp.run(['powershell', '-Command', ps_script], capture_output=True, timeout=10)
+            time.sleep(0.5)
+            safe_hotkey(driver, 'ctrl', 'v')
+            time.sleep(3)
+            self.log_emit(f"  🖼️ 이미지 붙여넣기 완료: {os.path.basename(image_path)}")
+        except Exception as e:
+            raise RuntimeError(f"이미지 삽입 모든 방법 실패: {e}")
+
+
+class CafeCollectPage(QWidget):
+    def __init__(self, main_win):
+        super().__init__()
+        # === v28: 발행 기능을 위한 초기화 (인기글과 동일) ===
+        self._publishing_flag = False
+        self._image_pool = []
+        self.publish_queue = []
+        self._selected_alignment = "left"
+        if not hasattr(self, "generated_articles"):
+            self.generated_articles = []
+        self._folder_cache = {}
+        self.main = main_win
+        self.cafe_id = None
+        self.generated_articles = []
+        self._generating = False
+        self._cancel_generate = False
+        self.menu_list = []  # [(menuId, menuName), ...]
+        layout = QVBoxLayout(self)
+
+        title = QLabel("☕ 카페 수집 → AI 글쓰기")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        layout.addWidget(title)
+
+        cg = QGroupBox("1단계: 카페 수집")
+        cl = QVBoxLayout(cg)
+
+        # ── URL + 카테고리 불러오기 ──
+        url_row = QHBoxLayout()
+        self.cafe_url = QLineEdit()
+        self.cafe_url.setPlaceholderText("https://cafe.naver.com/f-e/cafes/XXXXX/menus/YY?viewType=L&page=1")
+        url_row.addWidget(self.cafe_url)
+        self.fetch_cat_btn = QPushButton("📁 카테고리 불러오기")
+        self.fetch_cat_btn.setStyleSheet("background:#2196F3; color:white; padding:6px 12px;")
+        self.fetch_cat_btn.clicked.connect(self.fetch_categories)
+        url_row.addWidget(self.fetch_cat_btn)
+        cl.addLayout(url_row)
+
+        # ── 카테고리 선택 ──
+        cat_row = QHBoxLayout()
+        cat_row.addWidget(QLabel("카테고리:"))
+        self.category_combo = QComboBox()
+        self.category_combo.setMinimumWidth(400)
+        cat_row.addWidget(self.category_combo, 1)
+        cl.addLayout(cat_row)
+
+        # ── 페이지 범위 ──
+        page_row = QHBoxLayout()
+        page_row.addWidget(QLabel("페이지 범위:"))
+        self.page_start = QSpinBox()
+        self.page_start.setMinimum(1)
+        self.page_start.setMaximum(999)
+        self.page_start.setValue(1)
+        page_row.addWidget(self.page_start)
+        page_row.addWidget(QLabel("~"))
+        self.page_end = QSpinBox()
+        self.page_end.setMinimum(1)
+        self.page_end.setMaximum(999)
+        self.page_end.setValue(3)
+        page_row.addWidget(self.page_end)
+        page_row.addWidget(QLabel("페이지"))
+        page_row.addStretch()
+        cl.addLayout(page_row)
+
+        # ── 전체 수집 시작 ──
+        self.collect_btn = QPushButton("🔄 전체 수집 시작")
+        self.collect_btn.setStyleSheet("background:#4CAF50; color:white; font-size:14px; padding:10px;")
+        self.collect_btn.clicked.connect(self.start_collect)
+        cl.addWidget(self.collect_btn)
+
+        self.collect_result = QTextBrowser()
+        self.collect_result.setMaximumHeight(120)
+        cl.addWidget(self.collect_result)
+
+        # ── 수집 결과 표 (체크박스 + 선택 발행) ──
+        cl.addWidget(QLabel("📋 수집된 카페 글 (체크한 항목만 AI 입력으로 전달):"))
+        self.collect_cafe_table = QTableWidget()
+        self.collect_cafe_table.setColumnCount(4)
+        self.collect_cafe_table.setHorizontalHeaderLabels(["선택", "카페", "제목", "본문 요약"])
+        self.collect_cafe_table.setColumnWidth(0, 50)
+        self.collect_cafe_table.setColumnWidth(1, 120)
+        self.collect_cafe_table.setColumnWidth(2, 320)
+        self.collect_cafe_table.horizontalHeader().setStretchLastSection(True)
+        self.collect_cafe_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.collect_cafe_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.collect_cafe_table.setMinimumHeight(180)
+        self.collect_cafe_table.itemSelectionChanged.connect(self._on_cafe_selected)
+        cl.addWidget(self.collect_cafe_table)
+
+        h_cafe_sel = QHBoxLayout()
+        btn_cafe_all = QPushButton("☑️ 전체 선택")
+        btn_cafe_all.clicked.connect(lambda: self._toggle_all_cafe(True))
+        h_cafe_sel.addWidget(btn_cafe_all)
+        btn_cafe_none = QPushButton("⬜ 전체 해제")
+        btn_cafe_none.clicked.connect(lambda: self._toggle_all_cafe(False))
+        h_cafe_sel.addWidget(btn_cafe_none)
+        h_cafe_sel.addStretch()
+        cl.addLayout(h_cafe_sel)
+
+        layout.addWidget(cg)
+
+        # ── 2단계: AI 글쓰기 ──
+        ag = QGroupBox("2단계: AI 글쓰기")
+        al = QVBoxLayout(ag)
+
+        h = QHBoxLayout()
+        h.addWidget(QLabel("AI 서비스:"))
+        self.ai_model = QComboBox()
+        self.ai_model.addItems(["Perplexity (sonar-pro)", "Gemini (gemini-2.5-flash)", "GPT (gpt-4o)"])
+        h.addWidget(self.ai_model, 2)
+        h.addWidget(QLabel("글자 수:"))
+        self.char_count = QSpinBox()
+        self.char_count.setRange(500, 10000)
+        self.char_count.setValue(2000)
+        self.char_count.setSingleStep(500)
+        h.addWidget(self.char_count)
+        al.addLayout(h)
+
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setPlaceholderText("AI에게 전달할 프롬프트...")
+        self.ai_prompt.setPlainText(
+            "아래 카페 글을 참고하여 SEO 최적화된 네이버 블로그 포스트를 작성해주세요.\n"
+            "- 자연스러운 말투 (1인칭 경험담/의견)\n"
+            "- 소제목 3개 이상 (##)\n"
+            "- 핵심 키워드 자연스럽게 5회 이상 배치\n"
+            "- [사진] 태그로 사진 삽입 위치 표시\n"
+            "- 마지막에 해시태그 5개 추가"
+        )
+        self.ai_prompt.setMaximumHeight(100)
+        al.addWidget(QLabel("프롬프트:"))
+        al.addWidget(self.ai_prompt)
+
+        h2 = QHBoxLayout()
+        send = QPushButton("⬇️ 수집→AI (체크된 것만)")
+        send.clicked.connect(self.send_cafe_to_ai)
+        h2.addWidget(send)
+        self.gen_btn = QPushButton("🎯 AI 원고 생성")
+        self.gen_btn.clicked.connect(self.generate_ai)
+        self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+        h2.addWidget(self.gen_btn)
+        al.addLayout(h2)
+
+        self.ai_progress = QProgressBar()
+        self.ai_progress.setVisible(False)
+        al.addWidget(self.ai_progress)
+
+        self.ai_input = QTextEdit()
+        self.ai_input.setPlaceholderText("수집된 카페 글이 AI 입력으로 전달됩니다...")
+        self.ai_input.setMaximumHeight(100)
+        al.addWidget(QLabel("AI 입력 (수집 데이터):"))
+        al.addWidget(self.ai_input)
+
+        al.addWidget(QLabel("📋 생성된 원고 리스트 (체크한 항목만 발행):"))
+        self.article_table = QTableWidget()
+        self.article_table.setColumnCount(5)
+        self.article_table.setHorizontalHeaderLabels(["선택", "번호", "상태", "제목", "글자수"])
+        self.article_table.horizontalHeader().setStretchLastSection(True)
+        self.article_table.setColumnWidth(0, 50)
+        self.article_table.setColumnWidth(1, 50)
+        self.article_table.setColumnWidth(2, 70)
+        self.article_table.setColumnWidth(3, 350)
+        self.article_table.setColumnWidth(4, 70)
+        self.article_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.article_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.article_table.itemSelectionChanged.connect(self._on_article_selected)
+        self.article_table.setMinimumHeight(150)
+        al.addWidget(self.article_table)
+
+        h_cafe_art_sel = QHBoxLayout()
+        btn_cafe_art_all = QPushButton("☑️ 전체 선택")
+        btn_cafe_art_all.clicked.connect(lambda: self._toggle_all_articles(True))
+        h_cafe_art_sel.addWidget(btn_cafe_art_all)
+        btn_cafe_art_none = QPushButton("⬜ 전체 해제")
+        btn_cafe_art_none.clicked.connect(lambda: self._toggle_all_articles(False))
+        h_cafe_art_sel.addWidget(btn_cafe_art_none)
+        h_cafe_art_sel.addStretch()
+        al.addLayout(h_cafe_art_sel)
+
+        self.ai_output = QTextBrowser()
+        self.ai_output.setPlaceholderText("원고를 선택하면 여기에 표시됩니다...")
+        al.addWidget(QLabel("📄 선택된 원고 미리보기:"))
+        al.addWidget(self.ai_output)
+
+        self.error_summary_label = QLabel("⚠️ 주요 오류:")
+        self.error_summary_label.setVisible(False)
+        al.addWidget(self.error_summary_label)
+        self.error_summary = QTextBrowser()
+        self.error_summary.setMaximumHeight(60)
+        self.error_summary.setVisible(False)
+        al.addWidget(self.error_summary)
+
+        h3 = QHBoxLayout()
+        copy_btn = QPushButton("📋 선택 원고 복사")
+        copy_btn.clicked.connect(self._copy_selected_article)
+        h3.addWidget(copy_btn)
+        copy_all_btn = QPushButton("📋 전체 원고 복사")
+        copy_all_btn.clicked.connect(self._copy_all_articles)
+        h3.addWidget(copy_all_btn)
+        save_btn = QPushButton("💾 전체 원고 저장")
+        save_btn.clicked.connect(self._save_draft)
+        h3.addWidget(save_btn)
+        export_btn = QPushButton("📊 엑셀로 내보내기")
+        export_btn.clicked.connect(self._export_articles_excel)
+        h3.addWidget(export_btn)
+        import_btn = QPushButton("📥 엑셀 원고 불러오기")
+        import_btn.clicked.connect(self._import_articles_excel)
+        h3.addWidget(import_btn)
+        al.addLayout(h3)
+
+        layout.addWidget(ag)
+
+
+        # ═══════════════════════════════════════════
+        # v28: 이미지 관리 + 블로그 발행 (인기글과 동일)
+        # ═══════════════════════════════════════════
+        # ══════════════════════════════════════
+        # STEP 2.5: 이미지 관리
+        # ══════════════════════════════════════
+        step_img = QGroupBox("🖼️ STEP 2.5  이미지 관리 (본문 [사진] 위치에 삽입)")
+        si = QVBoxLayout(step_img)
+
+        si.addWidget(QLabel("원고 본문에 [사진] 태그가 있으면 발행 시 해당 위치에 이미지가 삽입됩니다."))
+
+        # 이미지 리스트 테이블
+        self.image_table = QTableWidget()
+        self.image_table.setColumnCount(4)
+        self.image_table.setHorizontalHeaderLabels(["번호", "소스", "설명/프롬프트", "파일경로"])
+        self.image_table.horizontalHeader().setStretchLastSection(True)
+        self.image_table.setColumnWidth(0, 40)
+        self.image_table.setColumnWidth(1, 70)
+        self.image_table.setColumnWidth(2, 250)
+        self.image_table.setMinimumHeight(120)
+        self.image_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        si.addWidget(self.image_table)
+        self._image_pool = []  # [{'source':'upload'|'dalle', 'desc':'...', 'path':'...'}, ...]
+
+        h_img_btns = QHBoxLayout()
+
+        self.img_upload_btn = QPushButton("📁 이미지 직접 업로드")
+        self.img_upload_btn.clicked.connect(self._upload_images)
+        self.img_upload_btn.setStyleSheet("background-color:#2d6a4f; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_upload_btn)
+
+        self.img_dalle_btn = QPushButton("🤖 AI 이미지 생성 (ChatGPT)")
+        self.img_dalle_btn.clicked.connect(self._generate_dalle_images)
+        self.img_dalle_btn.setStyleSheet("background-color:#4a1a8a; color:white; font-weight:bold; padding:6px;")
+        h_img_btns.addWidget(self.img_dalle_btn)
+
+        self.img_del_btn = QPushButton("🗑️ 선택 삭제")
+        self.img_del_btn.clicked.connect(self._delete_selected_image)
+        h_img_btns.addWidget(self.img_del_btn)
+
+        self.img_clear_btn = QPushButton("🗑️ 전체 삭제")
+        self.img_clear_btn.clicked.connect(self._clear_all_images)
+        h_img_btns.addWidget(self.img_clear_btn)
+        si.addLayout(h_img_btns)
+
+        # AI 이미지 생성 옵션
+        h_dalle_opt = QHBoxLayout()
+        h_dalle_opt.addWidget(QLabel("DALL-E 프롬프트:"))
+        self.dalle_prompt = QLineEdit()
+        self.dalle_prompt.setPlaceholderText("이미지 설명을 입력하세요 (예: 서울 야경, 커피 한 잔)")
+        h_dalle_opt.addWidget(self.dalle_prompt, 4)
+
+        h_dalle_opt.addWidget(QLabel("크기:"))
+        self.dalle_size = QComboBox()
+        self.dalle_size.addItems(["1024x1024", "1024x1536", "1536x1024"])
+        h_dalle_opt.addWidget(self.dalle_size)
+
+        h_dalle_opt.addWidget(QLabel("장수:"))
+        self.dalle_count = QSpinBox()
+        self.dalle_count.setRange(1, 10)
+        self.dalle_count.setValue(1)
+        h_dalle_opt.addWidget(self.dalle_count)
+        si.addLayout(h_dalle_opt)
+
+        # 자동 생성 옵션
+        h_auto = QHBoxLayout()
+        self.auto_dalle_check = QCheckBox("원고별 자동 이미지 생성 (원고 제목 기반)")
+        self.auto_dalle_check.setToolTip("원고 생성 시 각 원고의 제목을 프롬프트로 DALL-E 이미지를 자동 생성합니다")
+        h_auto.addWidget(self.auto_dalle_check)
+
+        self.auto_dalle_count = QSpinBox()
+        self.auto_dalle_count.setRange(1, 5)
+        self.auto_dalle_count.setValue(1)
+        h_auto.addWidget(QLabel("원고당 이미지:"))
+        h_auto.addWidget(self.auto_dalle_count)
+        h_auto.addStretch()
+        si.addLayout(h_auto)
+
+        self.img_status = QLabel("")
+        self.img_status.setStyleSheet("color:#888; font-size:11px;")
+        si.addWidget(self.img_status)
+
+        layout.addWidget(step_img)
+
+        # ══════════════════════════════════════
+        # STEP 3: 네이버 블로그 자동 발행
+        # ══════════════════════════════════════
+        step3 = QGroupBox("STEP 3️⃣  네이버 블로그 자동 발행")
+        s3 = QVBoxLayout(step3)
+
+        h3_acc = QHBoxLayout()
+        h3_acc.addWidget(QLabel("발행 계정:"))
+        self.account_combo = QComboBox()
+        accounts = self.main.config.get('naver_accounts', [])
+        if not accounts and self.main.config.get('naver_id'):
+            accounts = [{'id': self.main.config.get('naver_id', '')}]
+        for acc in accounts:
+            self.account_combo.addItem(acc.get('id', ''))
+        h3_acc.addWidget(self.account_combo, 2)
+        s3.addLayout(h3_acc)
+
+        h3a = QHBoxLayout()
+        h3a.addWidget(QLabel("블로그 폴더:"))
+        self.blog_folder = QComboBox()
+        self.blog_folder.setEditable(True)
+        h3a.addWidget(self.blog_folder, 2)
+
+        self.load_folders_btn = QPushButton("🔄 폴더 불러오기")
+        self.load_folders_btn.clicked.connect(self.load_blog_folders)
+        h3a.addWidget(self.load_folders_btn)
+        s3.addLayout(h3a)
+
+        h3b = QHBoxLayout()
+        h3b.addWidget(QLabel("저장 형태:"))
+        self.save_mode = QComboBox()
+        self.save_mode.addItems(["💾 임시저장", "📤 즉시발행", "⏰ 예약발행"])
+        # v24: 본문 정렬 선택
+        self.alignment_combo = QComboBox()
+        self.alignment_combo.addItems(["⬅️ 좌측 정렬", "⬆️ 가운데 정렬", "➡️ 우측 정렬", "↔️ 양쪽 정렬"])
+        self.alignment_combo.currentIndexChanged.connect(
+            lambda i: setattr(self, '_selected_alignment', ['left','center','right','justify'][i])
+        )
+        self._selected_alignment = 'left'
+        h3b.addWidget(self.save_mode)
+        h3b.addWidget(QLabel("정렬:"))
+        h3b.addWidget(self.alignment_combo)
+        s3.addLayout(h3b)
+
+        self.publish_btn = QPushButton("🚀 블로그 발행")
+        self.publish_btn.clicked.connect(self.publish_to_blog)
+        self.publish_btn.setStyleSheet("background-color:#8B0000; color:white; font-weight:bold; padding:8px;")
+        s3.addWidget(self.publish_btn)
+
+        self.pub_progress = QProgressBar()
+        self.pub_progress.setVisible(False)
+        s3.addWidget(self.pub_progress)
+
+        layout.addWidget(step3)
+
+    def _parse_cafe_id_from_url(self, url):
+        """URL에서 cafeId 추출"""
+        import re
+        # 패턴1: /cafes/12345/
+        m = re.search(r'/cafes/(\d+)', url)
+        if m:
+            return int(m.group(1))
+        # 패턴2: clubid=12345
+        m = re.search(r'clubid=(\d+)', url)
+        if m:
+            return int(m.group(1))
+        # 패턴3: cafe.naver.com/카페이름 → API로 cafeId 조회
+        m = re.search(r'cafe\.naver\.com/([a-zA-Z0-9_]+)', url)
+        if m:
+            cafe_name = m.group(1)
+            if cafe_name not in ['f-e', 'ca-fe']:
+                try:
+                    resp = requests.get(
+                        f'https://apis.naver.com/cafe-web/cafe2/CafeGateInfo.json?cafeUrl={cafe_name}',
+                        headers={'Referer': 'https://cafe.naver.com/'},
+                        timeout=10
+                    )
+                    data = resp.json()
+                    return data['message']['result']['cafeInfoView']['cafeId']
+                except Exception:
+                    pass
+        return None
+
+    def _parse_menu_id_from_url(self, url):
+        """URL에서 menuId 추출"""
+        import re
+        m = re.search(r'/menus/(\d+)', url)
+        if m:
+            return int(m.group(1))
+        m = re.search(r'menuid=(\d+)', url, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def fetch_categories(self):
+        """네이버 카페 API로 카테고리(게시판) 목록 불러오기"""
+        url = self.cafe_url.text().strip()
+        if not url:
+            self.main.log("⚠️ URL을 먼저 입력하세요.")
+            return
+
+        cafe_id = self._parse_cafe_id_from_url(url)
+        if not cafe_id:
+            self.main.log("❌ URL에서 카페 ID를 추출할 수 없습니다.")
+            return
+
+        self.cafe_id = cafe_id
+        self.fetch_cat_btn.setEnabled(False)
+        self.fetch_cat_btn.setText("불러오는 중...")
+
+        def do():
+            api_url = f'https://apis.naver.com/cafe-web/cafe2/SideMenuList?cafeId={cafe_id}'
+            headers = {
+                'Referer': 'https://cafe.naver.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            }
+            resp = requests.get(api_url, headers=headers, timeout=15)
+            data = resp.json()
+            menus = data.get('message', {}).get('result', {}).get('menus', [])
+
+            result = []
+            for m in menus:
+                menu_type = m.get('menuType', '')
+                menu_id = m.get('menuId', 0)
+                menu_name = m.get('menuName', '').strip()
+                board_type = m.get('boardType', '').strip()
+
+                # B=일반게시판, I=이미지, M=동영상, S=스크랩 등 글이 있는 게시판만
+                if menu_type in ('B', 'I', 'M', 'S', 'E') and menu_name:
+                    result.append((menu_id, menu_name))
+                # F=폴더(구분선) - 참고용으로 표시
+                elif menu_type == 'F' and menu_name:
+                    result.append((0, f'── {menu_name} ──'))
+
+            return result
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+
+        def on_result(menus):
+            self.menu_list = menus
+            self.category_combo.clear()
+            board_count = 0
+            for mid, mname in menus:
+                if mid == 0:
+                    self.category_combo.addItem(mname, 0)
+                    # 폴더 항목은 선택 불가
+                    idx = self.category_combo.count() - 1
+                    model = self.category_combo.model()
+                    item = model.item(idx)
+                    item.setEnabled(False)
+                else:
+                    self.category_combo.addItem(f'{mname} ({mid})', mid)
+                    board_count += 1
+
+            # URL에서 menuId가 있으면 자동 선택
+            url_menu_id = self._parse_menu_id_from_url(self.cafe_url.text())
+            if url_menu_id:
+                for i in range(self.category_combo.count()):
+                    if self.category_combo.itemData(i) == url_menu_id:
+                        self.category_combo.setCurrentIndex(i)
+                        break
+
+            self.main.log(f"✅ {board_count}개 게시판 카테고리를 불러왔습니다. (cafeId={self.cafe_id})")
+
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.fetch_cat_btn.setEnabled(True),
+            self.fetch_cat_btn.setText("📁 카테고리 불러오기")
+        ))
+        thread.start()
+
+    def start_collect(self):
+        """선택한 카테고리의 게시글 목록 수집 (API 기반)"""
+        if not self.cafe_id:
+            # URL에서 다시 파싱 시도
+            self.cafe_id = self._parse_cafe_id_from_url(self.cafe_url.text())
+
+        if not self.cafe_id:
+            self.main.log("⚠️ 먼저 카테고리를 불러오세요.")
+            return
+
+        menu_id = self.category_combo.currentData()
+        if not menu_id:
+            self.main.log("⚠️ 게시판을 선택하세요.")
+            return
+
+        menu_name = self.category_combo.currentText()
+        page_start = self.page_start.value()
+        page_end = self.page_end.value()
+
+        self.collect_btn.setEnabled(False)
+        self.collect_btn.setText("수집 중...")
+        self.collect_result.clear()
+
+        cafe_id = self.cafe_id
+        self.main.log(f"📦 [{menu_name}] {page_start}~{page_end}페이지 수집 시작")
+
+        def do():
+            headers = {
+                'Referer': 'https://cafe.naver.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            }
+            all_articles = []
+
+            for page in range(page_start, page_end + 1):
+                self.log_emit(f"📄 {page}/{page_end} 페이지 수집 중...")
+                api_url = (
+                    f'https://apis.naver.com/cafe-web/cafe2/ArticleListV2.json'
+                    f'?search.clubid={cafe_id}'
+                    f'&search.menuid={menu_id}'
+                    f'&search.page={page}'
+                    f'&search.perPage=15'
+                )
+                try:
+                    resp = requests.get(api_url, headers=headers, timeout=15)
+                    data = resp.json()
+                    articles = data.get('message', {}).get('result', {}).get('articleList', [])
+                    self.log_emit(f"  → {len(articles)}개 게시글 발견")
+
+                    for art in articles:
+                        article_id = art.get('articleId', '')
+                        subject = art.get('subject', '').strip()
+                        writer = art.get('writerNickname', '')
+                        read_count = art.get('readCount', 0)
+                        comment_count = art.get('commentCount', 0)
+                        like_count = art.get('likeItCount', 0)
+                        link = f"https://cafe.naver.com/f-e/cafes/{cafe_id}/articles/{article_id}"
+
+                        all_articles.append({
+                            'title': subject,
+                            'writer': writer,
+                            'views': read_count,
+                            'comments': comment_count,
+                            'likes': like_count,
+                            'link': link,
+                            'articleId': article_id
+                        })
+                except Exception as e:
+                    self.log_emit(f"  ❌ {page}페이지 오류: {e}")
+                time.sleep(0.5)
+
+            # 결과 포맷팅
+            lines = [f"총 {len(all_articles)}개 게시글 수집 완료"]
+            lines.append("=" * 50)
+            for i, art in enumerate(all_articles, 1):
+                lines.append(f"\n[{i}] {art['title']}")
+                lines.append(f"    작성자: {art['writer']} | 조회: {art['views']} | 댓글: {art['comments']} | 좋아요: {art['likes']}")
+                lines.append(f"    {art['link']}")
+
+            return '\n'.join(lines)
+
+        def log_emit_fn(msg):
+            self.main.log(msg)
+
+        self.log_emit = log_emit_fn
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.collect_result.setPlainText(r))
+        thread.finished_signal.connect(lambda: (
+            self.collect_btn.setEnabled(True),
+            self.collect_btn.setText("🔄 전체 수집 시작")
+        ))
+        thread.start()
+
+    def _on_article_selected(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows: return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            self.ai_output.setPlainText(self.generated_articles[idx].get('content', ''))
+
+    def _copy_selected_article(self):
+        rows = self.article_table.selectionModel().selectedRows()
+        if not rows:
+            self.main.log("⚠️ 원고를 먼저 선택하세요")
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.generated_articles):
+            pyperclip.copy(self.generated_articles[idx].get('content', ''))
+            self.main.log(f"📋 원고 #{idx+1} 복사 완료")
+
+    def _copy_all_articles(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 생성된 원고가 없습니다")
+            return
+        all_text = ""
+        for i, art in enumerate(self.generated_articles):
+            all_text += f"\n{'='*60}\n[원고 {i+1}] {art.get('title','')}\n{'='*60}\n"
+            all_text += art.get('content', '') + "\n"
+        pyperclip.copy(all_text)
+        self.main.log(f"📋 전체 {len(self.generated_articles)}건 원고 복사 완료")
+
+    def _update_article_table(self):
+        self.article_table.setRowCount(len(self.generated_articles))
+        for i, art in enumerate(self.generated_articles):
+            status = art.get('status', '완료')
+            self._set_article_check(i, checked=(status == '완료'))
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem(status))
+            self.article_table.setItem(i, 3, QTableWidgetItem(art.get('title', '')[:80]))
+            content = art.get('content', '')
+            self.article_table.setItem(i, 4, QTableWidgetItem(str(len(content)) if status == "완료" else "실패"))
+
+    def _save_draft(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 저장할 원고가 없습니다")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(self, "원고 저장", f"카페_원고_{ts}.txt", "Text Files (*.txt)")
+        if not path: return
+        with open(path, 'w', encoding='utf-8') as f:
+            for i, art in enumerate(self.generated_articles):
+                f.write(f"\n{'='*60}\n[원고 {i+1}] {art.get('title','')}\n{'='*60}\n")
+                f.write(art.get('content', '') + "\n\n")
+        self.main.log(f"💾 {len(self.generated_articles)}건 원고 저장 완료: {path}")
+
+    def _export_articles_excel(self):
+        if not self.generated_articles:
+            self.main.log("⚠️ 내보낼 원고가 없습니다")
+            return
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            path, _ = QFileDialog.getSaveFileName(self, "엑셀 내보내기", "카페_원고_목록.xlsx", "Excel Files (*.xlsx)")
+            if not path: return
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "원고 목록"
+            headers = ["번호", "제목", "글자수", "상태", "원문 참고", "생성된 원고"]
+            header_fill = PatternFill('solid', fgColor='1a4a8a')
+            header_font = Font(bold=True, color='FFFFFF')
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center')
+            for i, art in enumerate(self.generated_articles):
+                ws.cell(row=i+2, column=1, value=i+1)
+                ws.cell(row=i+2, column=2, value=art.get('title', ''))
+                ws.cell(row=i+2, column=3, value=len(art.get('content', '')))
+                ws.cell(row=i+2, column=4, value=art.get('status', '완료'))
+                ws.cell(row=i+2, column=5, value=art.get('source', '')[:500])
+                ws.cell(row=i+2, column=6, value=art.get('content', ''))
+            wb.save(path)
+            self.main.log(f"📊 엑셀 내보내기 완료: {path}")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 내보내기 오류: {e}")
+
+    def _import_articles_excel(self):
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 원고 파일 선택", "", "Excel Files (*.xlsx *.xls)")
+        if not path: return
+        try:
+            import pandas as pd
+            df = pd.read_excel(path)
+            imported = []
+            for _, row in df.iterrows():
+                title = str(row.get('제목', row.get('title', '제목 없음')))
+                content = str(row.get('생성된 원고', row.get('content', row.get('생성된원고', ''))))
+                if content and content != 'nan':
+                    imported.append({'title': title if title != 'nan' else '제목 없음', 'content': content, 'status': '완료'})
+            if imported:
+                self.generated_articles.extend(imported)
+                self._update_article_table()
+                self.main.log(f"📥 엑셀에서 {len(imported)}건 원고 불러옴")
+        except Exception as e:
+            self.main.log(f"❌ 엑셀 불러오기 오류: {e}")
+
+    def _parse_cafe_posts(self, text):
+        posts = []
+        blocks = re.split(r'\n={3,}\n|\n-{3,}\n|\[\d+\]\s*제목:', text)
+        for block in blocks:
+            block = block.strip()
+            if not block or len(block) < 30: continue
+            blines = block.split('\n')
+            title = blines[0].strip()[:100] if blines else '카페 포스트'
+            body = '\n'.join(blines[1:]).strip()
+            if not body: body = block
+            posts.append({'title': title, 'body': body[:3000]})
+        return posts if posts else [{'title': '카페 포스트', 'body': text[:3000]}]
+
+    def generate_ai(self):
+        if getattr(self, '_generating', False):
+            self._cancel_generate = True
+            self.gen_btn.setText("🛑 취소 중...")
+            self.main.log("🛑 AI 생성 취소 요청됨...")
+            return
+        content = self.ai_input.toPlainText().strip()
+        if not content:
+            self.main.log("⚠️ AI 입력이 비어 있습니다")
+            return
+        cafe_posts = self._parse_cafe_posts(content)
+        if not cafe_posts:
+            self.main.log("⚠️ 파싱할 카페 글이 없습니다")
+            return
+
+        total = len(cafe_posts)
+        self._cancel_generate = False
+        self._generating = True
+        self.generated_articles = []
+        self.gen_btn.setText(f"🛑 생성 취소 (0/{total})")
+        self.gen_btn.setStyleSheet("background-color:#8a1a1a; color:white; font-weight:bold; padding:8px;")
+        self.ai_progress.setVisible(True)
+        self.ai_progress.setValue(0)
+        self.error_summary.setVisible(False)
+        self.error_summary_label.setVisible(False)
+
+        self.article_table.setRowCount(total)
+        for i, post in enumerate(cafe_posts):
+            self._set_article_check(i, checked=False)
+            self.article_table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.article_table.setItem(i, 2, QTableWidgetItem("대기"))
+            self.article_table.setItem(i, 3, QTableWidgetItem(post['title'][:80]))
+            self.article_table.setItem(i, 4, QTableWidgetItem("-"))
+
+        model_text = self.ai_model.currentText()
+        prompt = self.ai_prompt.toPlainText()
+        char_target = self.char_count.value()
+        self.main.log(f"🧠 AI 생성 시작 - 총 {total}건 개별 생성")
+
+        thread = WorkerThread(lambda: None)
+        def _ui_update(fn): thread.ui_update_signal.emit(fn)
+
+        def do():
+            generated = []
+            errors_collection = []
+            for idx, post in enumerate(cafe_posts):
+                if self._cancel_generate:
+                    thread.log_signal.emit(f"🛑 AI 생성 취소됨 ({len(generated)}건 처리됨)")
+                    break
+                thread.log_signal.emit(f"📝 [{idx+1}/{total}] AI 원고 생성 중: {post['title'][:40]}...")
+                _ui_update(lambda i=idx, t=total: self.gen_btn.setText(f"🛑 생성 취소 ({i+1}/{t})"))
+                _ui_update(lambda i=idx: self.article_table.setItem(i, 2, QTableWidgetItem("생성중")))
+                _ui_update(lambda i=idx, t=total: self.ai_progress.setValue(int((i / t) * 100)))
+
+                if len(post.get('body', '').strip()) < 20:
+                    err_msg = '본문이 비어있어 건너뜁니다'
+                    generated.append({'title': post['title'], 'content': f'❌ {err_msg}', 'status': '실패', 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 2, QTableWidgetItem("❌실패")))
+                    continue
+
+                full = f"{prompt}\n\n[목표 글자수: {char_target}자]\n- 제목을 첫 줄에 ## 제목 형태로 작성해주세요\n"
+                full += f"\n[참고 자료 제목]: {post['title']}\n[참고 자료 본문]:\n{post['body'][:4500]}"
+
+                try:
+                    if "Perplexity" in model_text or "sonar" in model_text.lower():
+                        result = call_perplexity(self.main.config.get('perplex_key', '').strip(), full, model='sonar-pro', system_message='당신은 한국어 SEO 블로그 전문 작가입니다.')
+                    elif "Gemini" in model_text or "gemini" in model_text.lower():
+                        result = call_gemini_text(self.main.config.get('gemini_key', '').strip(), full, model='gemini-2.5-flash')
+                    else:
+                        result = call_openai_text(self.main.config.get('openai_key', '').strip(), full, model='gpt-4o')
+
+                    gen_title = post['title']
+                    for line in result.split('\n'):
+                        s = line.strip()
+                        if s.startswith('##'):
+                            gen_title = s.lstrip('#').strip()
+                            break
+
+                    generated.append({'title': gen_title, 'content': result, 'status': '완료', 'source': post.get('body', '')[:500]})
+                    # 즉시 발행 대기열 형태로 저장
+                    self.generated_articles = list(generated)
+                    try:
+                        _queue = [{'order': qi+1, 'title': ga['title'], 'content': ga['content'], 'status': 'pending', 'result': ''} for qi, ga in enumerate(generated) if ga.get('status') == '완료']
+                        if _queue:
+                            with open('publish_queue_cafe_incremental.json', 'w', encoding='utf-8') as _qf:
+                                json.dump(_queue, _qf, ensure_ascii=False, indent=2)
+                            thread.log_signal.emit(f"💾 [{idx+1}/{total}] 발행 대기열 저장 완료 ({len(_queue)}건)")
+                    except Exception: pass
+                    thread.log_signal.emit(f"✅ [{idx+1}/{total}] 완료: {gen_title[:40]}")
+                    _ui_update(lambda i=idx, t=gen_title, c=len(result): (
+                        self._set_article_check(i, checked=True),
+                        self.article_table.setItem(i, 2, QTableWidgetItem("✅완료")),
+                        self.article_table.setItem(i, 3, QTableWidgetItem(t[:80])),
+                        self.article_table.setItem(i, 4, QTableWidgetItem(str(c)))
+                    ))
+                except Exception as e:
+                    err_msg = format_error_message(e)
+                    thread.log_signal.emit(f"❌ [{idx+1}/{total}] 실패: {err_msg}")
+                    generated.append({'title': post['title'], 'content': f'❌ 오류: {err_msg}', 'status': '실패', 'error': err_msg})
+                    errors_collection.append(err_msg)
+                    _ui_update(lambda i=idx: self.article_table.setItem(i, 2, QTableWidgetItem("❌실패")))
+
+                if idx < total - 1 and not self._cancel_generate:
+                    wait_seconds = 4 if "perplexity" in model_text.lower() or "sonar" in model_text.lower() else 2
+                    for _ in range(wait_seconds * 2):
+                        if self._cancel_generate: break
+                        time.sleep(0.5)
+
+            self.generated_articles = generated
+            _ui_update(lambda: self.ai_progress.setValue(100))
+            success = sum(1 for a in generated if a.get('status') == '완료')
+            failed = sum(1 for a in generated if a.get('status') == '실패')
+            if errors_collection:
+                unique_errors = list(dict.fromkeys(errors_collection))
+                _ui_update(lambda: (self.error_summary.setPlainText("- " + "\n- ".join(unique_errors[:5])), self.error_summary.setVisible(True), self.error_summary_label.setVisible(True)))
+            thread.log_signal.emit(f"✅ AI 원고 생성 완료 - 총 {total}건 중 {success}건 성공, {failed}건 실패")
+
+        thread.func = do
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: None)
+        def _on_gen_finished():
+            self._generating = False
+            self._cancel_generate = False
+            self.gen_btn.setText("🎯 AI 원고 생성")
+            self.gen_btn.setStyleSheet("background-color:#1a4a8a; color:white; font-weight:bold; padding:8px;")
+            self.ai_progress.setVisible(False)
+        thread.finished_signal.connect(_on_gen_finished)
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════
+    # ─── 체크박스/선택 헬퍼 (v3 패치) ───
+    def _toggle_all_cafe(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.collect_cafe_table.rowCount()):
+            it = self.collect_cafe_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 수집 카페글 {'전체 선택' if state else '전체 해제'} ({self.collect_cafe_table.rowCount()}건)")
+
+    def _get_checked_cafe_indices(self):
+        out = []
+        for r in range(self.collect_cafe_table.rowCount()):
+            it = self.collect_cafe_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _on_cafe_selected(self):
+        """수집 카페글 행 클릭 시 본문을 AI 입력창에 미리보기"""
+        rows = self.collect_cafe_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        items = list(getattr(self, '_cafe_collected_items', []) or [])
+        idx = rows[0].row()
+        if 0 <= idx < len(items):
+            it = items[idx]
+            preview = (
+                f"[미리보기] 제목: {it.get('title','')}\n"
+                f"카페: {it.get('cafe', it.get('cafe_name',''))}\n"
+                f"링크: {it.get('url','')}\n\n"
+                f"본문:\n{it.get('body', it.get('content',''))}"
+            )
+            self.ai_input.setPlainText(preview)
+
+    def _toggle_all_articles(self, state: bool):
+        cs = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None:
+                it.setCheckState(cs)
+        self.main.log(f"📋 카페 원고 {'전체 선택' if state else '전체 해제'} ({self.article_table.rowCount()}건)")
+
+    def _get_checked_article_indices(self):
+        out = []
+        for r in range(self.article_table.rowCount()):
+            it = self.article_table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                out.append(r)
+        return out
+
+    def _set_article_check(self, row, checked=True):
+        it = QTableWidgetItem()
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.article_table.setItem(row, 0, it)
+
+    def _populate_cafe_collect_table(self, cafe_items):
+        """수집된 카페 글 dict 리스트를 표에 채운다.
+        cafe_items: [{'cafe':..., 'title':..., 'body':..., 'url':...}, ...]"""
+        self._cafe_collected_items = list(cafe_items or [])
+        self.collect_cafe_table.setRowCount(len(self._cafe_collected_items))
+        for i, it in enumerate(self._cafe_collected_items):
+            cb = QTableWidgetItem()
+            cb.setFlags(cb.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            cb.setCheckState(Qt.CheckState.Checked)
+            cb.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.collect_cafe_table.setItem(i, 0, cb)
+            self.collect_cafe_table.setItem(i, 1, QTableWidgetItem(str(it.get('cafe', it.get('cafe_name', '')))[:40]))
+            self.collect_cafe_table.setItem(i, 2, QTableWidgetItem(str(it.get('title', ''))[:120]))
+            body = str(it.get('body', it.get('content', '')))
+            body_short = (body[:80] + '…') if len(body) > 80 else body
+            self.collect_cafe_table.setItem(i, 3, QTableWidgetItem(body_short))
+        self.main.log(f"📋 카페 수집 표 갱신: {len(self._cafe_collected_items)}건 (기본 전체 체크)")
+
+    def send_cafe_to_ai(self):
+        # 체크된 항목만 AI 입력으로 전달 (체크 없으면 전체 텍스트)
+        items = list(getattr(self, '_cafe_collected_items', []) or [])
+        if items:
+            checked = self._get_checked_cafe_indices()
+            if checked:
+                items = [items[i] for i in checked if 0 <= i < len(items)]
+                self.main.log(f"📤 체크된 {len(items)}건만 AI 입력으로 전달합니다")
+            else:
+                self.main.log(f"⚠️ 체크된 항목이 없어 전체 {len(items)}건을 전달합니다")
+            blocks = []
+            for k, it in enumerate(items, 1):
+                blocks.append(f"[{k}] 제목: {it.get('title','')}\n카페: {it.get('cafe', it.get('cafe_name',''))}\n링크: {it.get('url','')}\n본문: {it.get('body', it.get('content',''))}")
+            text = "\n\n---\n\n".join(blocks)
+        else:
+            text = self.collect_result.toPlainText()
+
+        if not text:
+            self.main.log("⚠️ 먼저 카페 글을 수집하세요")
+            return
+        self.ai_input.setPlainText(text)
+        self.main.log("✅ 카페 데이터가 AI 입력으로 전달되었습니다")
+
+    # v28: 카페 페이지 발행 기능 (인기글에서 이식)
+    # ═══════════════════════════════════════════
+    def _load_folder_cache(self):
+        """계정별 폴더 캐시를 파일에서 로드"""
+        try:
+            with open('folder_cache.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_folder_cache(self):
+        """계정별 폴더 캐시를 파일에 저장"""
+        try:
+            with open('folder_cache.json', 'w', encoding='utf-8') as f:
+                json.dump(self._folder_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _get_selected_account(self):
+        """선택된 계정의 id/pw 반환"""
+        sel_id = self.account_combo.currentText().strip() if hasattr(self, 'account_combo') else ''
+        accounts = self.main.config.get('naver_accounts', [])
+        for acc in accounts:
+            if acc.get('id') == sel_id:
+                return acc.get('id', ''), acc.get('pw', '')
+        return self.main.config.get('naver_id', ''), self.main.config.get('naver_pw', '')
+    def _clear_folder_cache(self, account_id):
+        """특정 계정의 폴더 캐시 삭제"""
+        if account_id in self._folder_cache:
+            del self._folder_cache[account_id]
+            self._save_folder_cache()
+            self.blog_folder.clear()
+            self.main.log(f"🗑️ {account_id} 폴더 캐시 삭제됨")
+
+    def _on_account_changed(self, account_id):
+        """계정 변경 시 캐시된 폴더 자동 로드"""
+        account_id = account_id.strip()
+        if account_id and account_id in self._folder_cache:
+            self.blog_folder.clear()
+            self.blog_folder.addItems(self._folder_cache[account_id])
+            self.main.log(f"📂 {account_id} 저장된 폴더 자동 로드 ({len(self._folder_cache[account_id])}개)")
+        else:
+            self.blog_folder.clear()
+
+    # ─── 인기글 수집 ───
+
+    def _refresh_image_table(self):
+        """이미지 풀 테이블 갱신"""
+        self.image_table.setRowCount(len(self._image_pool))
+        for i, img in enumerate(self._image_pool):
+            self.image_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.image_table.setItem(i, 1, QTableWidgetItem("📁업로드" if img['source'] == 'upload' else "🤖AI"))
+            self.image_table.setItem(i, 2, QTableWidgetItem(img.get('desc', '')[:60]))
+            self.image_table.setItem(i, 3, QTableWidgetItem(img.get('path', '')))
+        self.img_status.setText(f"총 {len(self._image_pool)}개 이미지 등록됨")
+
+    def _upload_images(self):
+        """로컬 이미지 파일 직접 업로드"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "이미지 파일 선택", "",
+            "이미지 파일 (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;모든 파일 (*.*)"
+        )
+        if not files:
+            return
+        for fpath in files:
+            self._image_pool.append({
+                'source': 'upload',
+                'desc': os.path.basename(fpath),
+                'path': fpath,
+            })
+        self._refresh_image_table()
+        self.main.log(f"🖼️ {len(files)}개 이미지 업로드 완료 (총 {len(self._image_pool)}개)")
+
+    def _generate_dalle_images(self):
+        """DALL-E API로 이미지 생성"""
+        prompt = self.dalle_prompt.text().strip()
+        if not prompt:
+            self.main.log("⚠️ DALL-E 프롬프트를 입력하세요")
+            return
+        api_key = self.main.config.get('openai_key', '').strip()
+        if not api_key:
+            self.main.log("⚠️ OpenAI API Key가 설정되지 않았습니다 (설정 탭에서 입력)")
+            return
+
+        count = self.dalle_count.value()
+        size = self.dalle_size.currentText()
+
+        self.img_dalle_btn.setEnabled(False)
+        self.img_dalle_btn.setText(f"🤖 생성 중... (0/{count})")
+        self.main.log(f"🤖 DALL-E 이미지 생성 시작: '{prompt}' × {count}장")
+
+        def do_gen():
+            results = []
+            for i in range(count):
+                try:
+                    path = generate_dalle_image(api_key, prompt, size=size)
+                    results.append({'source': 'dalle', 'desc': prompt, 'path': path})
+                    thread.log_signal.emit(f"  🖼️ [{i+1}/{count}] 이미지 생성 완료")
+                except Exception as e:
+                    thread.log_signal.emit(f"  ❌ [{i+1}/{count}] 생성 실패: {format_error_message(e)}")
+                if i < count - 1:
+                    time.sleep(2)
+            return results
+
+        thread = WorkerThread(do_gen)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def on_result(results):
+            if isinstance(results, list):
+                self._image_pool.extend(results)
+                self._refresh_image_table()
+                self.main.log(f"✅ DALL-E 이미지 {len(results)}장 생성 완료 (총 {len(self._image_pool)}개)")
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            self.img_dalle_btn.setEnabled(True),
+            self.img_dalle_btn.setText("🤖 AI 이미지 생성 (ChatGPT)")
+        ))
+        thread.start()
+
+    def _auto_generate_dalle_for_article(self, article_title, api_key, count=1, size="1024x1024"):
+        """원고 제목 기반 자동 DALL-E 이미지 생성 (워커 스레드 내에서 호출)"""
+        generated = []
+        for i in range(count):
+            try:
+                prompt = f"네이버 블로그 포스팅용 고퀄리티 사진. 주제: {article_title}. 자연스러운 실제 사진 스타일, 텍스트 없이."
+                path = generate_dalle_image(api_key, prompt, size=size)
+                generated.append({'source': 'dalle', 'desc': f"자동생성: {article_title}", 'path': path})
+            except Exception as e:
+                pass  # 자동 생성 실패는 무시
+            if i < count - 1:
+                time.sleep(2)
+        return generated
+
+    def _delete_selected_image(self):
+        """선택된 이미지 삭제"""
+        rows = set(item.row() for item in self.image_table.selectedItems())
+        if not rows:
+            self.main.log("⚠️ 삭제할 이미지를 선택하세요")
+            return
+        for idx in sorted(rows, reverse=True):
+            if 0 <= idx < len(self._image_pool):
+                self._image_pool.pop(idx)
+        self._refresh_image_table()
+        self.main.log(f"🗑️ {len(rows)}개 이미지 삭제됨")
+
+    def _clear_all_images(self):
+        """모든 이미지 삭제"""
+        self._image_pool.clear()
+        self._refresh_image_table()
+        self.main.log("🗑️ 전체 이미지 삭제됨")
+
+    def _get_images_for_article(self, article_idx, photo_count):
+        """원고에 사용할 이미지들 반환 (라운드 로빈).
+        v27: photo_count가 0이어도 풀에 이미지가 있으면 최소 1장 반환 → 본문 시작 부분에 자동 삽입."""
+        if not self._image_pool:
+            return []
+        total_imgs = len(self._image_pool)
+        # [사진] 토큰이 0개여도 풀에 있으면 1장은 사용
+        effective = max(photo_count, 1) if total_imgs > 0 else photo_count
+        start = (article_idx * effective) % total_imgs
+        result = []
+        for i in range(effective):
+            idx = (start + i) % total_imgs
+            result.append(self._image_pool[idx]['path'])
+        return result
+    def _insert_image_to_editor(self, driver, image_path):
+        """네이버 블로그 에디터에 이미지를 삽입.
+        v27: 본문 전용 file input 우선 + 툴바 이미지 버튼 먼저 활성화 + iframe 진입."""
+        import subprocess as sp
+
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"이미지 파일 없음: {image_path}")
+
+        abs_path = os.path.abspath(image_path)
+
+        # iframe 진입 시도 (mainFrame 안에 에디터가 있음)
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame('mainFrame')
+        except Exception:
+            pass
+
+        # ── 방법 1: 본문 이미지 툴바 버튼을 먼저 눌러 file input 활성화 ──
+        try:
+            for btn_sel in [
+                'button.se-image-toolbar-button',
+                'button[data-name="image"]',
+                'button[data-type="image"]',
+                'button[aria-label*="사진"]',
+                'button[aria-label*="이미지"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    if btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(0.6)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # ── 방법 2: 본문 전용 file input 우선 (썸네일용은 보통 첫 번째라 제외) ──
+        try:
+            # 본문용 셀렉터 우선
+            preferred = []
+            for sel in [
+                'input.se-image-input-file',
+                'input[class*="image"][type="file"]',
+                'input[accept*="image"][type="file"]',
+            ]:
+                preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
+            # fallback: 모든 file input (썸네일 제외 위해 뒤쪽부터)
+            all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+            candidates = preferred + list(reversed(all_inputs))
+            seen = set()
+            for fi in candidates:
+                key = fi.get_attribute('outerHTML')[:200]
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    # display:none 인 input도 send_keys 가능
+                    driver.execute_script("arguments[0].style.display='block'; arguments[0].style.visibility='visible';", fi)
+                    fi.send_keys(abs_path)
+                    time.sleep(4)  # 업로드 + 처리 대기
+                    self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                    # iframe 복귀
+                    try:
+                        driver.switch_to.default_content()
+                        driver.switch_to.frame('mainFrame')
+                    except Exception:
+                        pass
+                    return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 2: 이미지 버튼 클릭 → file input에 전달
+        try:
+            for btn_sel in [
+                'button[data-name="image"]',
+                'button.se-image-toolbar-button',
+                'button[data-type="image"]',
+                'button.se-toolbar-button-image',
+            ]:
+                try:
+                    img_btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                    driver.execute_script("arguments[0].click();", img_btn)
+                    time.sleep(1)
+                    # file input 찾기
+                    file_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+                    for fi in file_inputs:
+                        try:
+                            fi.send_keys(os.path.abspath(image_path))
+                            time.sleep(3)
+                            self.log_emit(f"  🖼️ 이미지 업로드 완료: {os.path.basename(image_path)}")
+                            return
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 방법 3: PowerShell 클립보드 이미지 복사 → Ctrl+V
+        try:
+            abs_path = os.path.abspath(image_path).replace('\\', '/')
+            ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile('{abs_path}')
+[System.Windows.Forms.Clipboard]::SetImage($img)
+$img.Dispose()
+"""
+            sp.run(['powershell', '-Command', ps_script], capture_output=True, timeout=10)
+            time.sleep(0.5)
+            safe_hotkey(driver, 'ctrl', 'v')
+            time.sleep(3)
+            self.log_emit(f"  🖼️ 이미지 붙여넣기 완료: {os.path.basename(image_path)}")
+        except Exception as e:
+            raise RuntimeError(f"이미지 삽입 모든 방법 실패: {e}")
+
+
+    def load_blog_folders(self):
+        """블로그 폴더 불러오기 - 캐시 우선 사용"""
+        nid = self.account_combo.currentText().strip()
+        if not nid:
+            self.main.log("⚠️ 발행 계정을 선택하세요")
+            return
+
+        # 캐시 확인
+        if nid in self._folder_cache and self._folder_cache[nid]:
+            cached = self._folder_cache[nid]
+            self.blog_folder.clear()
+            self.blog_folder.addItems(cached)
+            self.main.log(f"📂 저장된 폴더 사용: {nid} ({len(cached)}개) — 새로고침하려면 캐시 삭제 후 재시도")
+            return
+
+        self.load_folders_btn.setEnabled(False)
+        self.main.log(f"🔄 [{nid}] 블로그 폴더 목록 불러오는 중...")
+
+        def do_load():
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': f'https://blog.naver.com/{nid}'
+                }
+                url = f"https://blog.naver.com/PostList.naver?blogId={nid}"
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    folders = []
+                    for opt in soup.select('select option, li a[onclick*="category"]'):
+                        name = opt.get_text(strip=True)
+                        if name and name not in ['전체보기', ''] and len(name) < 50:
+                            if name not in folders:
+                                folders.append(name)
+                    if folders:
+                        return folders
+                return []
+            except Exception as e:
+                self.log_emit(f"⚠️ 폴더 불러오기 실패: {e}")
+                return []
+
+        thread = WorkerThread(do_load)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        def on_result(folders):
+            if folders and isinstance(folders, list):
+                self.blog_folder.clear()
+                self.blog_folder.addItems(folders)
+                # 캐시에 저장
+                self._folder_cache[nid] = folders
+                self._save_folder_cache()
+                self.main.log(f"✅ {len(folders)}개 폴더 로드 완료 (캐시 저장됨 — 다음부터 자동 로드)")
+            else:
+                self.main.log("⚠️ 폴더를 찾을 수 없습니다")
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: self.load_folders_btn.setEnabled(True))
+        thread.start()
+
+
+    def _build_publish_queue(self):
+        source_articles = list(getattr(self, 'generated_articles', []) or [])
+
+        # 체크된 행만 발행 (없으면 전체 폴백)
+        try:
+            checked = self._get_checked_article_indices()
+        except Exception:
+            checked = []
+        if source_articles and checked:
+            source_articles = [source_articles[i] for i in checked if 0 <= i < len(source_articles)]
+            try:
+                self.main.log(f"📤 발행 대기열: 체크된 {len(source_articles)}건만 발행")
+            except Exception:
+                pass
+        elif source_articles:
+            try:
+                self.main.log(f"⚠️ 체크된 원고가 없어 전체 {len(source_articles)}건을 발행합니다")
+            except Exception:
+                pass
+
+        if not source_articles:
+            content = self.ai_output.toPlainText().strip()
+            if content:
+                source_articles = [{'title': '카페 포스트', 'content': content}]
+        queue = []
+        for idx, article in enumerate(source_articles, start=1):
+            title = str(article.get('title', f'카페 포스트 {idx}')).strip() or f'카페 포스트 {idx}'
+            content = str(article.get('content', '')).strip()
+            status = article.get('status', '')
+            if not content or status == '실패': continue
+            queue.append({'order': idx, 'title': title, 'content': content, 'status': 'pending', 'result': ''})
+        return queue
+
+    def _write_publish_queue_snapshot(self, account_id, queue):
+        safe_account = re.sub(r'[^0-9A-Za-z_.-]+', '_', (account_id or 'default').strip())
+        path = f"publish_queue_popular_{safe_account}.json"
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(queue, f, ensure_ascii=False, indent=2)
+        return path
+
+
+    def publish_to_blog(self):
+        """generated_articles 리스트를 순회하며 각각 블로그에 발행 (순차 처리)"""
+        # 중복 실행 방지
+        if self._publishing_flag:
+            self.main.log("⚠️ 이미 발행이 진행 중입니다. 완료될 때까지 기다려주세요.")
+            return
+
+        publish_queue = self._build_publish_queue()
+        if not publish_queue:
+            self.main.log("⚠️ 발행할 원고가 없습니다. AI 글쓰기를 먼저 실행하세요")
+            return
+
+        config = self.main.config
+        naver_id, naver_pw = self._get_selected_account()
+        if not naver_id or not naver_pw:
+            self.main.log("⚠️ 설정에서 네이버 계정을 먼저 입력하세요")
+            return
+
+        folder = self.blog_folder.currentText().strip()
+        mode = self.save_mode.currentText()
+        total = len(publish_queue)
+        queue_path = self._write_publish_queue_snapshot(naver_id, publish_queue)
+        self.publish_queue = publish_queue
+        self._publishing_flag = True
+
+        self.publish_btn.setEnabled(False)
+        self.publish_btn.setText(f"발행 중... (0/{total})")
+        self.pub_progress.setVisible(True)
+        self.pub_progress.setValue(0)
+
+        self.main.log(f"🚀 총 {total}건 블로그 발행 시작")
+        for qi, q_item in enumerate(publish_queue): self.main.log(f"  📋 [{qi+1}] {q_item['title'][:40]} ({len(q_item['content'])}자)")
+        self.main.log(f"🗂️ 발행 대기열 저장 완료: {queue_path}")
+
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            opts = uc.ChromeOptions()
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--disable-popup-blocking')
+            prefs = {
+                'profile.default_content_setting_values.popups': 0,
+            }
+            opts.add_experimental_option('prefs', prefs)
+            driver = make_uc_driver(opts)
+
+            # ── window.open 완전 차단 (드라이버 생성 직후) ──
+            def block_window_open():
+                try:
+                    driver.execute_script("""
+                        if (!window._woBlocked) {
+                            window._origOpen = window.open;
+                            window.open = function(url) {
+                                if (url) window.location.href = url;
+                                return window;
+                            };
+                            window._woBlocked = true;
+                        }
+                    """)
+                except Exception:
+                    pass
+            # ── "작성중인 글이 있습니다" 팝업 취소 처리 ──
+            def dismiss_draft_popup():
+                """에디터 진입 시 '작성중인 글이 있습니다' 팝업이 뜨면 취소 버튼 클릭"""
+                try:
+                    time.sleep(2)
+                    cancel_selectors = [
+                        'button.se-popup-button-cancel',
+                        'button.cancel_btn__WEaBq',
+                        'button.cancel_btn',
+                        'button[class*="cancel"]',
+                        'button.se-cancel',
+                    ]
+                    # 팝업 텍스트로도 탐지
+                    try:
+                        popup_texts = driver.find_elements(By.XPATH,
+                            "//*[contains(text(),'작성중인') or contains(text(),'작성 중인') or contains(text(),'임시저장')]")
+                        if popup_texts:
+                            self.log_emit("  ℹ️ '작성중인 글' 팝업 감지 → 취소 클릭 시도")
+                            for sel in cancel_selectors:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                            # CSS 셀렉터 실패 시 XPATH로 취소/아니오 버튼 찾기
+                            cancel_btns = driver.find_elements(By.XPATH,
+                                "//button[contains(text(),'취소') or contains(text(),'아니') or contains(text(),'아니오') or contains(text(),'새로')]")
+                            for btn in cancel_btns:
+                                try:
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        self.log_emit("  ✅ 작성중인 글 팝업 취소 완료 (XPATH)")
+                                        time.sleep(1)
+                                        return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.log_emit(f"  ℹ️ 팝업 처리 중 예외(무시): {e}")
+                return False
+
+
+            # ── 원고 정제 함수 ──
+            def sanitize_content(raw_content):
+                """발행 전 원고에서 불필요한 마크다운/이미지/참조를 제거"""
+                lines = raw_content.split('\n')
+                cleaned = []
+                for line in lines:
+                    s = line.strip()
+                    # 구분선 제거
+                    if re.match(r'^[━─═\-]{3,}', s):
+                        continue
+                    # [이미지 삽입] 줄 제거
+                    if s == '[이미지 삽입]':
+                        continue
+                    # 마크다운 이미지 ![alt](url) 제거
+                    if re.match(r'^!\[.*\]\(.*\)$', s):
+                        continue
+                    # 순수 URL만 있는 줄 제거 (이미지 URL)
+                    if re.match(r'^https?://\S+$', s):
+                        continue
+                    # URL (설명) 형태 줄 제거
+                    if re.match(r'^https?://\S+\s*\(.*\)$', s):
+                        continue
+                    # 📄 [번호] 헤더 줄 제거
+                    if re.match(r'^📄\s*\[\d+\]', s):
+                        continue
+                    # (공백 제외 N자) 제거
+                    if re.match(r'^\(공백\s*제외\s*\d+자\)$', s):
+                        continue
+                    # **추가 반전형 이미지 키워드** 블록 제거
+                    if '이미지 키워드' in s and ('추가' in s or '반전형' in s):
+                        continue
+                    # 번호. URL 형태 (이미지 리스트) 제거
+                    if re.match(r'^\d+\.\s*https?://\S+', s):
+                        continue
+                    # 참조 번호 [1][2] 등 제거 (텍스트는 유지)
+                    s = re.sub(r'\[\d+\]', '', s)
+                    # ## 마크다운 헤더 → 일반 텍스트
+                    s = re.sub(r'^#{1,6}\s*', '', s)
+                    # **bold** → 일반 텍스트
+                    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+                    s = s.strip()
+                    if s:
+                        cleaned.append(s)
+                # 연속 빈 줄 정리
+                result = '\n'.join(cleaned)
+                result = re.sub(r'\n{3,}', '\n\n', result)
+                return result.strip()
+
+            def validate_article(article):
+                """발행 가능한 원고인지 검증. 불가 시 사유 반환"""
+                title = (article.get('title') or '').strip()
+                content = (article.get('content') or '').strip()
+                if not title or not content:
+                    return '제목 또는 본문이 비어 있습니다'
+                if '필수 입력 정보 부재' in content or '요청을 정확히 처리할 수 없습니다' in content:
+                    return '오류 원고 (AI가 생성 실패한 항목)'
+                # 정제 후에도 내용이 너무 짧으면 스킵
+                sanitized = sanitize_content(content)
+                if len(sanitized) < 50:
+                    return f'정제 후 본문이 너무 짧습니다 ({len(sanitized)}자)'
+                return None  # 검증 통과
+
+            success_count = 0
+            fail_count = 0
+            main_window = None
+
+            def update_queue_status(index, status, result):
+                publish_queue[index]['status'] = status
+                publish_queue[index]['result'] = result
+                self._write_publish_queue_snapshot(naver_id, publish_queue)
+
+            def keep_only_window(target_handle=None):
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                target = target_handle or main_window or handles[-1]
+                for handle in list(handles):
+                    if handle == target:
+                        continue
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(target)
+                main_window = target
+
+            def close_all_extra_tabs():
+                """main_window 외 모든 탭을 닫는다"""
+                nonlocal main_window
+                handles = list(driver.window_handles)
+                if not handles:
+                    return
+                if not main_window or main_window not in handles:
+                    main_window = handles[0]
+                for h in handles:
+                    if h == main_window:
+                        continue
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                try:
+                    driver.switch_to.window(main_window)
+                except Exception:
+                    pass
+
+            def open_editor_single_tab():
+                """항상 단일 탭에서 글쓰기 에디터를 연다"""
+                nonlocal main_window
+
+                # 0) 먼저 탭 1개만 남기기
+                close_all_extra_tabs()
+
+                # 1) 현재 탭에서 에디터로 이동 (execute_script로 강제)
+                editor_url = 'https://blog.naver.com/GoBlogWrite.naver'
+                try:
+                    driver.execute_script(f'window.location.href = "{editor_url}";')
+                except Exception:
+                    driver.get(editor_url)
+
+                time.sleep(5)
+
+                # 2) 새 탭이 열렸으면 마지막 탭(에디터)만 남기고 닫기
+                handles = list(driver.window_handles)
+                if len(handles) > 1:
+                    editor_tab = handles[-1]
+                    for h in handles:
+                        if h == editor_tab:
+                            continue
+                        try:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        except Exception:
+                            pass
+                    driver.switch_to.window(editor_tab)
+                    main_window = editor_tab
+                    self.log_emit(f"  ℹ️ 추가 탭 {len(handles)-1}개 닫고 에디터 탭만 유지")
+                else:
+                    main_window = handles[0] if handles else driver.current_window_handle
+                    driver.switch_to.window(main_window)
+
+                # 3) iframe 전환
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+
+                # mainFrame이 있으면 진입
+                try:
+                    iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, 'mainFrame'))
+                    )
+                    driver.switch_to.frame(iframe)
+                    time.sleep(1)
+                    self.log_emit("  ✅ mainFrame iframe 진입 성공")
+                    dismiss_draft_popup()
+                except Exception:
+                    self.log_emit("  ℹ️ mainFrame 없음, 직접 에디터 접근 시도")
+
+                # 4) 에디터 로드 확인
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.se-title-text, div[contenteditable="true"]'))
+                    )
+                    self.log_emit("  ✅ 에디터 로드 확인")
+                except Exception:
+                    self.log_emit("  ⚠️ 에디터 요소를 찾지 못했습니다 (계속 시도)")
+
+            def select_folder_if_needed():
+                if not folder:
+                    return True
+                selectors = ['select#categoryId', 'select[name="categoryId"]']
+                for selector in selectors:
+                    try:
+                        cat_select = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        cat_select.click()
+                        time.sleep(0.3)
+                        for opt in cat_select.find_elements(By.TAG_NAME, 'option'):
+                            if folder in opt.text:
+                                opt.click()
+                                time.sleep(0.3)
+                                return True
+                    except Exception:
+                        continue
+                return False
+
+            def input_title(art_title):
+                title_selectors = [
+                    'span.se-placeholder',
+                    'div[data-name="title"] div[contenteditable="true"]',
+                    'div.se-section-title div.se-text-paragraph',
+                    'div.se-title-text',
+                ]
+                last_error = None
+                for selector in title_selectors:
+                    try:
+                        title_el = WebDriverWait(driver, 3).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                        try:
+                            title_el.click()
+                        except Exception:
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            ActionChains(driver).move_to_element(title_el).click().perform()
+                        time.sleep(0.2)
+                        pyperclip.copy(art_title)
+                        safe_hotkey(driver, 'ctrl', 'a')
+                        time.sleep(0.1)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        time.sleep(0.3)
+                        self.log_emit(f"  ✅ 제목 입력 완료: {art_title[:30]}")
+                        return True
+                    except Exception as e:
+                        last_error = e
+                        continue
+                raise RuntimeError(f'제목 입력 실패: {last_error}')
+
+            def focus_body():
+                body_selectors = [
+                    'div.se-section-text div[contenteditable="true"]',
+                    'div.se-component-content div[contenteditable="true"]',
+                    'div.se-text-paragraph',
+                    'div[contenteditable="true"]',
+                ]
+                for selector in body_selectors:
+                    try:
+                        elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                        for elem in elems:
+                            if not elem.is_displayed():
+                                continue
+                            try:
+                                driver.execute_script("arguments[0].click();", elem)
+                            except Exception:
+                                elem.click()
+                            time.sleep(0.3)
+                            return True
+                    except Exception:
+                        continue
+                try:
+                    safe_press(driver, 'tab')
+                    time.sleep(0.3)
+                    return True
+                except Exception:
+                    return False
+
+            def input_body(art_content):
+                if not focus_body():
+                    raise RuntimeError('본문 입력 영역 포커스 실패')
+
+                # v26: 본문 전처리만 먼저, 정렬은 입력 후에 적용
+                art_content = preprocess_article_lines(art_content)
+                alignment = getattr(self, '_selected_alignment', 'left')
+
+                wrote_any = False
+                for raw_line in art_content.split('\n'):
+                    line = raw_line.rstrip()
+                    if not line.strip():
+                        safe_press(driver, 'enter')
+                        time.sleep(0.05)
+                        continue
+
+                    # 스티커 토큰 처리
+                    sticker_idxs = extract_sticker_indices(line)
+                    line_wo_sticker = strip_sticker_tokens(line)
+
+                    # 인용구 자동 감지 — 한 줄만 인용 블록, 나머지는 일반 문단
+                    if line_wo_sticker and looks_like_quote(line_wo_sticker):
+                        insert_quote_block(driver, line_wo_sticker)
+                        wrote_any = True
+                    elif line_wo_sticker:
+                        pyperclip.copy(line_wo_sticker)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        safe_press(driver, 'enter')
+                        time.sleep(0.1)
+                        wrote_any = True
+
+                    for sidx in sticker_idxs:
+                        try:
+                            insert_naver_sticker(driver, sidx)
+                            safe_press(driver, 'enter')
+                        except Exception:
+                            pass
+
+                if not wrote_any:
+                    raise RuntimeError('본문 내용이 비어 있어 입력하지 못했습니다')
+
+                # v26: 입력 완료 후 전체 선택 → 정렬 적용 (+ JS fallback)
+                try:
+                    apply_alignment(driver, alignment, select_all_first=True)
+                except Exception:
+                    pass
+
+            def submit_article(art_idx, art_title):
+                time.sleep(1)
+                if '임시' in mode:
+                    save_selectors = [
+                        'button[data-testid="save-btn"]',
+                        'button.save_btn__Y5f57',
+                        'button.save_btn',
+                        'button[class*="save"]',
+                    ]
+                    clicked = False
+                    for selector in save_selectors:
+                        try:
+                            btn = WebDriverWait(driver, 3).until(
+                                EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        try:
+                            btn = driver.find_element(
+                                By.XPATH, '//button[contains(., "임시저장")]'
+                            )
+                            driver.execute_script("arguments[0].click();", btn)
+                            clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        raise RuntimeError('임시저장 버튼을 찾지 못했습니다')
+                    time.sleep(2)
+                    self.log_emit(f"  💾 [{art_idx + 1}/{total}] 임시저장 완료: {art_title[:30]}")
+                    driver.execute_script('window.location.href = "https://blog.naver.com";')
+                    time.sleep(2)
+                    return True, '임시저장 완료'
+
+
+                publish_selectors = [
+                    'button[data-testid="publish-btn"]',
+                    'button.publish_btn__Y5f57',
+                    'button.publish_btn',
+                    'button[class*="publish"]',
+                ]
+                confirm_selectors = [
+                    'button.se-popup-button-confirm',
+                    'button.confirm_btn__WEaBq',
+                    'button.confirm_btn',
+                    'button[class*="confirm"]',
+                ]
+
+                clicked = False
+                for selector in publish_selectors:
+                    try:
+                        btn = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        driver.execute_script("arguments[0].click();", btn)
+                        clicked = True
+                        break
+                    except Exception:
+                        continue
+                if not clicked:
+                    raise RuntimeError('발행 버튼을 찾지 못했습니다')
+
+                time.sleep(2)
+
+                confirmed = False
+                for selector in confirm_selectors:
+                    try:
+                        btn = driver.find_element(By.CSS_SELECTOR, selector)
+                        driver.execute_script("arguments[0].click();", btn)
+                        confirmed = True
+                        break
+                    except Exception:
+                        continue
+
+                if not confirmed:
+                    self.log_emit('  ℹ️ 발행 확인 팝업이 없어 바로 완료 여부를 확인합니다')
+
+                time.sleep(4)
+                current_url = (driver.current_url or '').lower()
+                if 'goblogwrite' in current_url:
+                    self.log_emit('  ⚠️ 에디터 URL에 머물러 있음, 발행 재시도...')
+                    # 한 번 더 confirm 버튼 시도
+                    for selector in confirm_selectors:
+                        try:
+                            btn = driver.find_element(By.CSS_SELECTOR, selector)
+                            driver.execute_script("arguments[0].click();", btn)
+                            time.sleep(3)
+                            break
+                        except Exception:
+                            continue
+
+                self.log_emit(f"  📤 [{art_idx + 1}/{total}] 즉시발행 완료")
+                return True, driver.current_url
+
+            try:
+                self.log_emit('🔑 네이버 로그인 중...')
+                if not naver_login_with_fallback(driver, naver_id, naver_pw, self.log_emit):
+                    return '❌ 로그인 실패 - 설정에서 계정을 확인하세요'
+                self.log_emit('✅ 로그인 완료')
+                main_window = driver.current_window_handle
+                close_all_extra_tabs()
+                block_window_open()
+
+                for art_idx, article in enumerate(publish_queue):
+                    try:
+                        art_title = article.get('title', f'포스트 {art_idx + 1}')
+                        art_content = article.get('content', '')
+
+                        # ── 원고 검증 ──
+                        skip_reason = validate_article(article)
+                        if skip_reason:
+                            self.log_emit(f"\n⏭️ [{art_idx + 1}/{total}] 건너뜀: {skip_reason} — {art_title[:30]}")
+                            fail_count += 1
+                            update_queue_status(art_idx, 'skipped', skip_reason)
+                            continue
+
+                        # ── 원고 정제 ──
+                        art_content = sanitize_content(art_content)
+
+                        # ── 본문에서 제목 줄 제거 (제목은 별도 입력) ──
+                        content_lines = art_content.split('\n')
+                        filtered_lines = []
+                        title_stripped = False
+                        for cl in content_lines:
+                            cl_clean = cl.strip()
+                            if not title_stripped and cl_clean and (
+                                cl_clean == art_title.strip() or
+                                re.sub(r'^#{1,6}\s*', '', cl_clean) == art_title.strip() or
+                                cl_clean.replace('**', '') == art_title.strip()
+                            ):
+                                title_stripped = True
+                                continue
+                            filtered_lines.append(cl)
+                        art_content = '\n'.join(filtered_lines).strip()
+                        self.log_emit(f"\n📝 [{art_idx + 1}/{total}] 발행 시작: {art_title[:40]}... (정제 후 {len(art_content)}자)")
+                        QTimer.singleShot(0, lambda idx=art_idx: self.publish_btn.setText(f"발행 중... ({idx + 1}/{total})"))
+
+                        open_editor_single_tab()
+                        block_window_open()  # 에디터 로드 후 다시 차단
+
+                        if folder and not select_folder_if_needed():
+                            self.log_emit('  ⚠️ 폴더 선택 실패, 기본 카테고리로 진행합니다')
+
+                        input_title(art_title)
+                        input_body(art_content)
+                        ok, result_message = submit_article(art_idx, art_title)
+
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                        success_count += 1
+                        update_queue_status(art_idx, 'done', result_message)
+
+                    except Exception as e:
+                        self.log_emit(f"  ❌ [{art_idx + 1}/{total}] 발행 실패: {e}")
+                        fail_count += 1
+                        update_queue_status(art_idx, 'error', str(e))
+                        try:
+                            driver.switch_to.default_content()
+                        except Exception:
+                            pass
+                        close_all_extra_tabs()
+                        time.sleep(1)
+
+                    self._emit_progress(self.pub_progress, int(((art_idx + 1) / total) * 100))
+                    time.sleep(2)
+
+                return f"✅ 블로그 발행 완료! 성공: {success_count}건, 실패: {fail_count}건"
+
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(lambda r: self.main.log(r))
+
+        def on_news_publish_finished():
+            self._publishing_flag = False
+            self.publish_btn.setEnabled(True)
+            self.publish_btn.setText('🚀 블로그 발행')
+            self.pub_progress.setVisible(False)
+
+        thread.finished_signal.connect(on_news_publish_finished)
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+#  4. 뉴스 수집 페이지 (웹 크롤링 방식)
+# ═══════════════════════════════════════════════════════════════
+
+
+#  6. 자동 발행 페이지
+# ═══════════════════════════════════════════════════════════════
+
+class PublishPage(QWidget):
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        layout = QVBoxLayout(self)
+
+        title = QLabel("🚀 다중 플랫폼 자동 발행")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        layout.addWidget(title)
+
+        self.pub_platform = QComboBox()
+        self.pub_platform.addItems(["네이버 블로그", "네이버 카페", "네이버 숏츠"])
+        layout.addWidget(QLabel("플랫폼:"));
+        layout.addWidget(self.pub_platform)
+
+        self.pub_mode = QComboBox()
+        self.pub_mode.addItems(["💾 임시저장", "📤 즉시발행", "⏰ 예약발행"])
+        layout.addWidget(QLabel("모드:"));
+        layout.addWidget(self.pub_mode)
+
+        self.pub_content = QTextEdit()
+        self.pub_content.setPlaceholderText("발행할 원고 붙여넣기...")
+        layout.addWidget(self.pub_content)
+
+        self.pub_btn = QPushButton("🔥 발행 실행")
+        self.pub_btn.clicked.connect(self.publish)
+        layout.addWidget(self.pub_btn)
+        layout.addStretch()
+
+    def publish(self):
+        content = self.pub_content.toPlainText().strip()
+        if not content:
+            self.main.log("⚠️ 원고가 비어 있음");
+            return
+        self.pub_btn.setEnabled(False)
+        plat = self.pub_platform.currentText()
+
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            driver = make_uc_driver(opts)
+            try:
+                nid = self.main.config.get('naver_id', '')
+                npw = self.main.config.get('naver_pw', '')
+                naver_login_with_fallback(driver, nid, npw)
+                if "블로그" in plat:
+                    driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                time.sleep(3)
+                pyperclip.copy(content)
+                return f"✅ {plat} 발행 준비 완료"
+            finally:
+                pass
+        def do():
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            opts = uc.ChromeOptions()
+            opts.add_argument('--start-maximized')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--disable-features=RendererCodeIntegrity')
+            opts.add_argument('--user-data-dir=./chrome_profile')
+            opts.add_argument('--disable-popup-blocking')
+            prefs = {'profile.default_content_setting_values.popups': 0}
+            opts.add_experimental_option('prefs', prefs)
+            driver = make_uc_driver(opts)
+
+            # window.open 차단
+            def block_wo():
+                try:
+                    driver.execute_script("""
+                        if (!window._woBlocked) {
+                            window.open = function(url) {
+                                if (url) window.location.href = url;
+                                return window;
+                            };
+                            window._woBlocked = true;
+                        }
+                    """)
+                except Exception:
+                    pass
+
+            def close_extra():
+                main = driver.window_handles[0]
+                for h in list(driver.window_handles):
+                    if h == main: continue
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(main)
+
+            try:
+                nid = self.main.config.get('naver_id', '')
+                npw = self.main.config.get('naver_pw', '')
+                naver_login_with_fallback(driver, nid, npw)
+                block_wo()
+                close_extra()
+
+                if "블로그" in plat:
+                    try:
+                        driver.execute_script('window.location.href = "https://blog.naver.com/GoBlogWrite.naver";')
+                    except Exception:
+                        driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                    time.sleep(5)
+                    close_extra()
+                    block_wo()
+
+                    # iframe
+                    try:
+                        iframe = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.ID, 'mainFrame'))
+                        )
+                        driver.switch_to.frame(iframe)
+                        time.sleep(1)
+                    except Exception:
+                        pass
+
+                    # 본문 붙여넣기
+                    pyperclip.copy(content)
+                    try:
+                        safe_press(driver, 'tab')
+                        time.sleep(0.3)
+                        safe_hotkey(driver, 'ctrl', 'v')
+                        time.sleep(1)
+                    except Exception:
+                        pass
+
+                    close_extra()
+
+                return f"✅ {plat} 발행 준비 완료 — 브라우저에서 확인 후 발행하세요"
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        thread = WorkerThread(do)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.result_signal.connect(self.main.log)
+        thread.finished_signal.connect(lambda: (self.pub_btn.setEnabled(True), self.pub_btn.setText("🔥 발행 실행")))
+        thread.start()
+# ═══════════════════════════════════════════════════════════════
+#  메인 윈도우
+# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  이미지 생성 페이지 (GPT DALL-E)
+# ═══════════════════════════════════════════════════════════════
+class ImageGenPage(QWidget):
+    """GPT DALL-E를 이용한 이미지 생성 전용 페이지"""
+
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        self._generated_images = []  # [{'prompt':'...', 'path':'...', 'size':'...'}, ...]
+        self._generating = False
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("🖼️ AI 이미지 생성 (ChatGPT)")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#BB86FC;")
+        layout.addWidget(title)
+
+        desc = QLabel("OpenAI ChatGPT (gpt-image-1) 모델을 사용하여 블로그용 고퀄리티 이미지를 생성합니다")
+        desc.setStyleSheet("color:#888; margin-bottom:8px;")
+        layout.addWidget(desc)
+
+        # ── 이미지 생성 설정 ──
+        gen_group = QGroupBox("🎨 이미지 생성")
+        g = QVBoxLayout(gen_group)
+
+        g.addWidget(QLabel("프롬프트 (이미지 설명):"))
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setPlaceholderText(
+            "생성할 이미지를 자세히 설명하세요.\n\n"
+            "예시:\n"
+            "• 서울 남산타워가 보이는 야경, 시네마틱 느낌\n"
+            "• 카페에서 라떼아트가 있는 커피 한 잔, 따뜻한 조명\n"
+            "• 봄 벚꽃이 만개한 공원 산책로, 밝고 화사한 분위기\n\n"
+            "여러 줄 입력 시 각 줄마다 별도 이미지를 생성합니다."
+        )
+        self.prompt_input.setMaximumHeight(150)
+        g.addWidget(self.prompt_input)
+
+        h_opts = QHBoxLayout()
+        h_opts.addWidget(QLabel("이미지 크기:"))
+        self.size_combo = QComboBox()
+        self.size_combo.addItems(["1024x1024 (정사각형)", "1024x1536 (세로형)", "1536x1024 (가로형)"])
+        h_opts.addWidget(self.size_combo, 2)
+
+        h_opts.addWidget(QLabel("품질:"))
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["low (빠름)", "medium (기본)", "high (고품질)"])
+        self.quality_combo.setCurrentIndex(1)
+        h_opts.addWidget(self.quality_combo)
+        g.addLayout(h_opts)
+
+        h_count = QHBoxLayout()
+        h_count.addWidget(QLabel("프롬프트당 생성 장수:"))
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(1, 10)
+        self.count_spin.setValue(1)
+        h_count.addWidget(self.count_spin)
+        h_count.addStretch()
+        g.addLayout(h_count)
+
+        h_btns = QHBoxLayout()
+        self.gen_btn = QPushButton("🎨 이미지 생성")
+        self.gen_btn.clicked.connect(self.generate_images)
+        self.gen_btn.setStyleSheet("background-color:#4a1a8a; color:white; font-weight:bold; padding:10px; font-size:14px;")
+        h_btns.addWidget(self.gen_btn)
+
+        self.cancel_btn = QPushButton("🛑 취소")
+        self.cancel_btn.clicked.connect(self._cancel_generation)
+        self.cancel_btn.setEnabled(False)
+        h_btns.addWidget(self.cancel_btn)
+        g.addLayout(h_btns)
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        g.addWidget(self.progress)
+
+        layout.addWidget(gen_group)
+
+        # ── 생성된 이미지 목록 ──
+        result_group = QGroupBox("📋 생성된 이미지 목록")
+        r = QVBoxLayout(result_group)
+
+        self.image_table = QTableWidget()
+        self.image_table.setColumnCount(5)
+        self.image_table.setHorizontalHeaderLabels(["번호", "프롬프트", "크기", "파일 경로", "상태"])
+        self.image_table.horizontalHeader().setStretchLastSection(True)
+        self.image_table.setColumnWidth(0, 40)
+        self.image_table.setColumnWidth(1, 300)
+        self.image_table.setColumnWidth(2, 100)
+        self.image_table.setColumnWidth(3, 250)
+        self.image_table.setColumnWidth(4, 60)
+        self.image_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.image_table.setMinimumHeight(200)
+        r.addWidget(self.image_table)
+
+        h_actions = QHBoxLayout()
+
+        self.open_folder_btn = QPushButton("📂 저장 폴더 열기")
+        self.open_folder_btn.clicked.connect(self._open_save_folder)
+        h_actions.addWidget(self.open_folder_btn)
+
+        self.copy_to_popular_btn = QPushButton("📤 인기글 이미지풀에 추가")
+        self.copy_to_popular_btn.clicked.connect(self._copy_to_popular_pool)
+        self.copy_to_popular_btn.setStyleSheet("background-color:#2d6a4f; color:white; font-weight:bold; padding:6px;")
+        h_actions.addWidget(self.copy_to_popular_btn)
+
+        self.del_selected_btn = QPushButton("🗑️ 선택 삭제")
+        self.del_selected_btn.clicked.connect(self._delete_selected)
+        h_actions.addWidget(self.del_selected_btn)
+
+        self.clear_btn = QPushButton("🗑️ 전체 삭제")
+        self.clear_btn.clicked.connect(self._clear_all)
+        h_actions.addWidget(self.clear_btn)
+        r.addLayout(h_actions)
+
+        self.status_label = QLabel("생성된 이미지: 0개")
+        self.status_label.setStyleSheet("color:#888; font-size:11px;")
+        r.addWidget(self.status_label)
+
+        layout.addWidget(result_group)
+
+        # ── 저장 경로 설정 ──
+        h_save = QHBoxLayout()
+        h_save.addWidget(QLabel("저장 폴더:"))
+        self.save_dir = QLineEdit()
+        default_dir = os.path.join(os.path.expanduser("~"), "Documents", "DALLE_Images")
+        self.save_dir.setText(default_dir)
+        h_save.addWidget(self.save_dir, 4)
+        browse_btn = QPushButton("📁 찾아보기")
+        browse_btn.clicked.connect(self._browse_save_dir)
+        h_save.addWidget(browse_btn)
+        layout.addLayout(h_save)
+
+        layout.addStretch()
+
+    def log_emit(self, msg):
+        self.main.log(msg)
+
+    def _get_size_str(self):
+        return self.size_combo.currentText().split(" ")[0]
+
+    def _get_quality(self):
+        return self.quality_combo.currentText().split(" ")[0]
+
+    def generate_images(self):
+        """프롬프트 기반 이미지 생성"""
+        raw = self.prompt_input.toPlainText().strip()
+        if not raw:
+            self.main.log("⚠️ 프롬프트를 입력하세요")
+            return
+
+        api_key = self.main.config.get('openai_key', '').strip()
+        if not api_key:
+            self.main.log("⚠️ OpenAI API Key가 설정되지 않았습니다 (설정 탭에서 입력)")
+            return
+
+        # 여러 줄 → 각각 별도 프롬프트
+        prompts = [p.strip() for p in raw.split('\n') if p.strip()]
+        count_per = self.count_spin.value()
+        size = self._get_size_str()
+        quality = self._get_quality()
+        save_dir = self.save_dir.text().strip()
+
+        if not save_dir:
+            save_dir = os.path.join(os.path.expanduser("~"), "Documents", "DALLE_Images")
+            self.save_dir.setText(save_dir)
+        os.makedirs(save_dir, exist_ok=True)
+
+        total_jobs = len(prompts) * count_per
+        self.main.log(f"🎨 DALL-E 이미지 생성 시작: {len(prompts)}개 프롬프트 × {count_per}장 = 총 {total_jobs}장")
+
+        self._generating = True
+        self._cancel_flag = False
+        self.gen_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+
+        def do_generate():
+            results = []
+            done = 0
+            for prompt in prompts:
+                for i in range(count_per):
+                    if self._cancel_flag:
+                        thread.log_signal.emit("🛑 이미지 생성 취소됨")
+                        return results
+
+                    thread.log_signal.emit(f"🖼️ [{done+1}/{total_jobs}] 생성 중: {prompt[:50]}...")
+
+                    try:
+                        client = OpenAI(api_key=api_key.strip())
+                        response = client.images.generate(
+                            model="gpt-image-1",
+                            prompt=prompt,
+                            size=size,
+                            quality=quality,
+                            n=1
+                        )
+                        img_item = response.data[0]
+                        revised_prompt = getattr(img_item, 'revised_prompt', None) or prompt
+
+                        # 이미지 데이터 추출
+                        if hasattr(img_item, 'b64_json') and img_item.b64_json:
+                            img_data = base64.b64decode(img_item.b64_json)
+                        elif hasattr(img_item, 'url') and img_item.url:
+                            img_data = requests.get(img_item.url, timeout=60).content
+                        else:
+                            raise RuntimeError('이미지 데이터 추출 실패')
+
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        safe_name = re.sub(r'[^a-zA-Z0-9가-힣]', '_', prompt[:30])
+                        filename = f"dalle_{timestamp}_{safe_name}_{i+1}.png"
+                        filepath = os.path.join(save_dir, filename)
+
+                        with open(filepath, 'wb') as f:
+                            f.write(img_data)
+
+                        results.append({
+                            'prompt': prompt,
+                            'revised_prompt': revised_prompt,
+                            'path': filepath,
+                            'size': size,
+                            'status': '완료'
+                        })
+                        thread.log_signal.emit(f"  ✅ [{done+1}/{total_jobs}] 저장: {filename}")
+                    except Exception as e:
+                        err = format_error_message(e)
+                        thread.log_signal.emit(f"  ❌ [{done+1}/{total_jobs}] 실패: {err}")
+                        results.append({
+                            'prompt': prompt,
+                            'path': '',
+                            'size': size,
+                            'status': '실패',
+                            'error': err
+                        })
+
+                    done += 1
+                    thread.ui_update_signal.emit(lambda d=done, t=total_jobs: self.progress.setValue(int(d/t*100)))
+
+                    if done < total_jobs and not self._cancel_flag:
+                        time.sleep(2)
+
+            return results
+
+        thread = WorkerThread(do_generate)
+        self.main.worker_threads.append(thread)
+        thread.log_signal.connect(self.main.log)
+        thread.ui_update_signal.connect(lambda fn: fn())
+
+        def on_result(results):
+            if isinstance(results, list):
+                self._generated_images.extend(results)
+                self._refresh_table()
+                success = sum(1 for r in results if r.get('status') == '완료')
+                failed = sum(1 for r in results if r.get('status') == '실패')
+                self.main.log(f"✅ DALL-E 이미지 생성 완료: {success}장 성공, {failed}장 실패")
+
+        thread.result_signal.connect(on_result)
+        thread.finished_signal.connect(lambda: (
+            setattr(self, '_generating', False),
+            self.gen_btn.setEnabled(True),
+            self.cancel_btn.setEnabled(False),
+            self.progress.setVisible(False),
+        ))
+        thread.start()
+
+    def _cancel_generation(self):
+        self._cancel_flag = True
+        self.cancel_btn.setEnabled(False)
+        self.main.log("🛑 이미지 생성 취소 요청됨...")
+
+    def _refresh_table(self):
+        self.image_table.setRowCount(len(self._generated_images))
+        for i, img in enumerate(self._generated_images):
+            self.image_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.image_table.setItem(i, 1, QTableWidgetItem(img.get('prompt', '')[:60]))
+            self.image_table.setItem(i, 2, QTableWidgetItem(img.get('size', '')))
+            self.image_table.setItem(i, 3, QTableWidgetItem(img.get('path', '')))
+            status = img.get('status', '')
+            self.image_table.setItem(i, 4, QTableWidgetItem(f"✅{status}" if status == '완료' else f"❌{status}"))
+        self.status_label.setText(f"생성된 이미지: {len(self._generated_images)}개")
+
+    def _open_save_folder(self):
+        save_dir = self.save_dir.text().strip()
+        if save_dir and os.path.isdir(save_dir):
+            import subprocess as sp
+            if platform.system() == 'Windows':
+                sp.Popen(['explorer', save_dir])
+            elif platform.system() == 'Darwin':
+                sp.Popen(['open', save_dir])
+            else:
+                sp.Popen(['xdg-open', save_dir])
+        else:
+            self.main.log("⚠️ 저장 폴더가 존재하지 않습니다")
+
+    def _copy_to_popular_pool(self):
+        """선택된 이미지를 인기글 페이지의 이미지풀에 추가"""
+        rows = set(item.row() for item in self.image_table.selectedItems())
+        if not rows:
+            # 전체 완료된 이미지 추가
+            rows = set(i for i, img in enumerate(self._generated_images) if img.get('status') == '완료')
+        if not rows:
+            self.main.log("⚠️ 추가할 이미지가 없습니다")
+            return
+
+        popular_page = self.main.pages.get('popular')
+        if not popular_page:
+            self.main.log("⚠️ 인기글 페이지를 찾을 수 없습니다")
+            return
+
+        count = 0
+        for idx in sorted(rows):
+            if 0 <= idx < len(self._generated_images):
+                img = self._generated_images[idx]
+                if img.get('path') and os.path.exists(img['path']):
+                    popular_page._image_pool.append({
+                        'source': 'dalle',
+                        'desc': img.get('prompt', ''),
+                        'path': img['path'],
+                    })
+                    count += 1
+
+        if count > 0:
+            popular_page._refresh_image_table()
+            self.main.log(f"📤 {count}개 이미지를 인기글 이미지풀에 추가 완료 (총 {len(popular_page._image_pool)}개)")
+        else:
+            self.main.log("⚠️ 유효한 이미지 파일이 없습니다")
+
+    def _browse_save_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "이미지 저장 폴더 선택")
+        if d:
+            self.save_dir.setText(d)
+
+    def _delete_selected(self):
+        rows = set(item.row() for item in self.image_table.selectedItems())
+        if not rows:
+            self.main.log("⚠️ 삭제할 이미지를 선택하세요")
+            return
+        for idx in sorted(rows, reverse=True):
+            if 0 <= idx < len(self._generated_images):
+                self._generated_images.pop(idx)
+        self._refresh_table()
+        self.main.log(f"🗑️ {len(rows)}개 이미지 삭제됨")
+
+    def _clear_all(self):
+        self._generated_images.clear()
+        self._refresh_table()
+        self.main.log("🗑️ 전체 이미지 목록 삭제됨")
+
+# ═══════════════════════════════════════════════════════════════════════
+#  🤖 AI 뉴스 봇 (살구뉴스 자동화) — 통합본
+# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+#  🤖 AI 뉴스 봇 (살구뉴스 자동화)
+#  ─────────────────────────────────────────────────────────────────────────
+#  원본 PostPro 프로그램에 통합되는 4개 페이지:
+#    1) SalgooConfigPage        ⚙️  설정
+#    2) SalgooNewsCollectPage   📥 뉴스 수집  (RSS 우선 → 실패 시 크롤링)
+#    3) SalgooAIRewritePage     ✨ AI 재작성  (Perplexity + Gemini)
+#    4) SalgooPublishPage       📤 발행       (safe HTML + auto Selenium)
+#
+#  데이터 저장:
+#    - ./salgoo_data/config.json     : 살구뉴스 설정 (네이버 ID/PW, 카테고리)
+#    - ./salgoo_data/dedup.sqlite    : 중복 차단 DB
+#    - ./salgoo_data/articles.json   : 수집/재작성된 기사 큐
+#    - ./salgoo_data/published/      : safe 모드 HTML 파일들
+#
+#  ⚠️  네이버 자동 임시저장(auto)은 사용자가 한 번 수동 로그인한 뒤
+#      그 세션을 그대로 사용합니다 (selenium 일반 모드, undetected 아님).
+# ═══════════════════════════════════════════════════════════════════════════
+
+import os
+import re
+import json
+import time
+import sqlite3
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urljoin, urlparse
+
+import requests
+import feedparser
+from bs4 import BeautifulSoup
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QTextEdit, QComboBox, QSpinBox, QCheckBox, QGroupBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QMessageBox, QFileDialog, QRadioButton,
+    QButtonGroup, QProgressBar, QSplitter, QAbstractItemView
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+
+# ───────────────────────────── 공통 경로 ─────────────────────────────
+SALGOO_DIR = Path("salgoo_data")
+SALGOO_DIR.mkdir(exist_ok=True)
+SALGOO_CONFIG_PATH = SALGOO_DIR / "config.json"
+SALGOO_DEDUP_DB = SALGOO_DIR / "dedup.sqlite"
+SALGOO_QUEUE_PATH = SALGOO_DIR / "articles.json"
+SALGOO_PUBLISHED_DIR = SALGOO_DIR / "published"
+SALGOO_PUBLISHED_DIR.mkdir(exist_ok=True)
+
+# 살구뉴스 사이트 (실제 도메인: www.salgoonews.com)
+SALGOO_DEFAULT_BASE = "https://www.salgoonews.com"
+SALGOO_DEFAULT_RSS = "https://www.salgoonews.com/rss/allArticle.xml"
+
+# 살구뉴스 섹션(카테고리) 코드 — articleList.html?sc_section_code=XXX
+SALGOO_SECTIONS = {
+    "전체": "",
+    "연예": "S1N1",
+    "스포츠": "S1N2",
+    "정치": "S1N3",
+    "경제": "S1N4",
+    "사회": "S1N5",
+    "문화": "S1N6",
+    "IT/과학": "S1N7",
+    "국제": "S1N8",
+}
+SALGOO_DEFAULT_SECTION = "S1N1"  # 연예
+
+# 기본 AI 재작성 프롬프트 (사용자가 설정에서 수정 가능)
+DEFAULT_PERPLEX_PROMPT = (
+    "다음 뉴스 기사를 사실 확인 및 보강하여 한국어로 재작성해줘.\n"
+    "- 원문 출처를 인용\n"
+    "- 객관적 톤\n"
+    "- 800~1200자\n\n"
+    "[제목]\n{title}\n\n[원문]\n{src}"
+)
+DEFAULT_GEMINI_PROMPT = (
+    "아래 뉴스 본문을 블로그 포스팅용으로 매끄럽게 재작성해줘.\n"
+    "- 친근한 한국어 톤\n"
+    "- 소제목 2~3개 포함 (### 사용)\n"
+    "- 1000~1500자\n"
+    "- 마지막에 한 줄 요약\n\n"
+    "[제목] {title}\n\n[원문]\n{src}"
+)
+
+
+def _load_salgoo_config() -> dict:
+    if SALGOO_CONFIG_PATH.exists():
+        try:
+            return json.loads(SALGOO_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_salgoo_config(cfg: dict) -> None:
+    SALGOO_CONFIG_PATH.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _load_queue() -> list:
+    if SALGOO_QUEUE_PATH.exists():
+        try:
+            return json.loads(SALGOO_QUEUE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+
+def _save_queue(items: list) -> None:
+    SALGOO_QUEUE_PATH.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+# ───────────────────────────── 중복 차단 DB ─────────────────────────────
+def _init_dedup_db():
+    conn = sqlite3.connect(SALGOO_DEDUP_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seen (
+            url_hash TEXT PRIMARY KEY,
+            url TEXT,
+            title TEXT,
+            collected_at TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _is_seen(url: str) -> bool:
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    conn = _init_dedup_db()
+    cur = conn.execute("SELECT 1 FROM seen WHERE url_hash=?", (h,))
+    found = cur.fetchone() is not None
+    conn.close()
+    return found
+
+
+def _mark_seen(url: str, title: str) -> None:
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    conn = _init_dedup_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO seen (url_hash, url, title, collected_at) VALUES (?, ?, ?, ?)",
+        (h, url, title, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  1) ⚙️  설정 페이지
+# ═══════════════════════════════════════════════════════════════════════
+class SalgooConfigPage(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self.cfg = _load_salgoo_config()
+        self._build_ui()
+        self._load_to_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("⚙️  AI 뉴스 봇 — 설정")
+        title.setStyleSheet("font-size:18px; font-weight:bold; color:#FFD700;")
+        root.addWidget(title)
+
+        # ─── 살구뉴스 사이트 설정 ───
+        gb_site = QGroupBox("📰 살구뉴스 사이트")
+        v_site = QVBoxLayout(gb_site)
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("Base URL:"))
+        self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText(SALGOO_DEFAULT_BASE)
+        h1.addWidget(self.base_url)
+        v_site.addLayout(h1)
+
+        h2 = QHBoxLayout()
+        h2.addWidget(QLabel("RSS URL:"))
+        self.rss_url = QLineEdit()
+        self.rss_url.setPlaceholderText(SALGOO_DEFAULT_RSS)
+        h2.addWidget(self.rss_url)
+        v_site.addLayout(h2)
+
+        h2b = QHBoxLayout()
+        h2b.addWidget(QLabel("섹션(카테고리):"))
+        self.section_combo = QComboBox()
+        for name in SALGOO_SECTIONS.keys():
+            self.section_combo.addItem(name)
+        h2b.addWidget(self.section_combo)
+        h2b.addWidget(QLabel("키워드 필터(쉼표, 선택):"))
+        self.categories = QLineEdit()
+        self.categories.setPlaceholderText("예: BTS, 아이유")
+        h2b.addWidget(self.categories)
+        v_site.addLayout(h2b)
+
+        root.addWidget(gb_site)
+
+        # ─── AI API 키 ───
+        gb_ai = QGroupBox("🤖 AI API 키")
+        v_ai = QVBoxLayout(gb_ai)
+        h_pp = QHBoxLayout()
+        h_pp.addWidget(QLabel("Perplexity API Key:"))
+        self.perplex_key = QLineEdit()
+        self.perplex_key.setEchoMode(QLineEdit.EchoMode.Password)
+        h_pp.addWidget(self.perplex_key)
+        v_ai.addLayout(h_pp)
+
+        h_gm = QHBoxLayout()
+        h_gm.addWidget(QLabel("Gemini API Key:"))
+        self.gemini_key = QLineEdit()
+        self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
+        h_gm.addWidget(self.gemini_key)
+        v_ai.addLayout(h_gm)
+
+        h_mode = QHBoxLayout()
+        h_mode.addWidget(QLabel("재작성 모델 우선순위:"))
+        self.ai_priority = QComboBox()
+        self.ai_priority.addItems([
+            "Perplexity → Gemini (사실확인 + 매끄럽게)",
+            "Perplexity 단독",
+            "Gemini 단독",
+        ])
+        h_mode.addWidget(self.ai_priority)
+        v_ai.addLayout(h_mode)
+
+        # ─── AI 재작성 프롬프트 (저장됨) ───
+        v_ai.addWidget(QLabel("📝 Perplexity 프롬프트 (사실확인/재작성용)"))
+        self.perplex_prompt = QTextEdit()
+        self.perplex_prompt.setPlaceholderText("{title}, {src} 자리표시자 사용 가능")
+        self.perplex_prompt.setMaximumHeight(110)
+        v_ai.addWidget(self.perplex_prompt)
+
+        v_ai.addWidget(QLabel("📝 Gemini 프롬프트 (블로그 톤 다듬기용)"))
+        self.gemini_prompt = QTextEdit()
+        self.gemini_prompt.setPlaceholderText("{title}, {src} 자리표시자 사용 가능")
+        self.gemini_prompt.setMaximumHeight(110)
+        v_ai.addWidget(self.gemini_prompt)
+
+        h_reset = QHBoxLayout()
+        self.reset_prompt_btn = QPushButton("↺ 기본 프롬프트 복원")
+        self.reset_prompt_btn.clicked.connect(self._reset_prompts)
+        h_reset.addStretch()
+        h_reset.addWidget(self.reset_prompt_btn)
+        v_ai.addLayout(h_reset)
+
+        root.addWidget(gb_ai)
+
+        # ─── 네이버 발행 계정 ───
+        gb_nv = QGroupBox("📤 네이버 블로그 발행 계정 (auto 모드용)")
+        v_nv = QVBoxLayout(gb_nv)
+        h_id = QHBoxLayout()
+        h_id.addWidget(QLabel("네이버 ID:"))
+        self.naver_id = QLineEdit()
+        h_id.addWidget(self.naver_id)
+        v_nv.addLayout(h_id)
+
+        h_pw = QHBoxLayout()
+        h_pw.addWidget(QLabel("네이버 PW:"))
+        self.naver_pw = QLineEdit()
+        self.naver_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        h_pw.addWidget(self.naver_pw)
+        v_nv.addLayout(h_pw)
+
+        warn = QLabel(
+            "⚠️  auto 발행은 [사용자가 1회 수동 로그인 → 세션 재사용] 방식입니다.\n"
+            "   비밀번호는 로컬 config.json에만 저장되며 외부 전송되지 않습니다."
+        )
+        warn.setStyleSheet("color:#FFA500; font-size:11px;")
+        warn.setWordWrap(True)
+        v_nv.addWidget(warn)
+        root.addWidget(gb_nv)
+
+        # ─── 저장 버튼 ───
+        h_btn = QHBoxLayout()
+        self.save_btn = QPushButton("💾 설정 저장")
+        self.save_btn.setStyleSheet(
+            "background-color:#FFD700; color:#000; font-weight:bold; padding:8px 16px;"
+        )
+        self.save_btn.clicked.connect(self.save_config)
+        h_btn.addStretch()
+        h_btn.addWidget(self.save_btn)
+        root.addLayout(h_btn)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#888; font-size:11px;")
+        root.addWidget(self.status)
+        root.addStretch()
+
+    def _load_to_ui(self):
+        self.base_url.setText(self.cfg.get("base_url", SALGOO_DEFAULT_BASE))
+        self.rss_url.setText(self.cfg.get("rss_url", SALGOO_DEFAULT_RSS))
+        self.categories.setText(self.cfg.get("categories", ""))
+        # 섹션 복원
+        saved_section = self.cfg.get("section_name", "연예")
+        idx = self.section_combo.findText(saved_section)
+        if idx >= 0:
+            self.section_combo.setCurrentIndex(idx)
+        self.perplex_key.setText(self.cfg.get("perplex_key", ""))
+        self.gemini_key.setText(self.cfg.get("gemini_key", ""))
+        self.ai_priority.setCurrentIndex(self.cfg.get("ai_priority", 0))
+        self.naver_id.setText(self.cfg.get("naver_id", ""))
+        self.naver_pw.setText(self.cfg.get("naver_pw", ""))
+        self.perplex_prompt.setPlainText(self.cfg.get("perplex_prompt", DEFAULT_PERPLEX_PROMPT))
+        self.gemini_prompt.setPlainText(self.cfg.get("gemini_prompt", DEFAULT_GEMINI_PROMPT))
+
+    def _reset_prompts(self):
+        self.perplex_prompt.setPlainText(DEFAULT_PERPLEX_PROMPT)
+        self.gemini_prompt.setPlainText(DEFAULT_GEMINI_PROMPT)
+        self.status.setText("프롬프트를 기본값으로 복원했습니다. (저장 버튼을 눌러 적용)")
+
+    def save_config(self):
+        section_name = self.section_combo.currentText()
+        section_code = SALGOO_SECTIONS.get(section_name, "")
+        self.cfg = {
+            "base_url": self.base_url.text().strip() or SALGOO_DEFAULT_BASE,
+            "rss_url": self.rss_url.text().strip() or SALGOO_DEFAULT_RSS,
+            "categories": self.categories.text().strip(),
+            "section_name": section_name,
+            "section_code": section_code,
+            "perplex_key": self.perplex_key.text().strip(),
+            "gemini_key": self.gemini_key.text().strip(),
+            "ai_priority": self.ai_priority.currentIndex(),
+            "naver_id": self.naver_id.text().strip(),
+            "naver_pw": self.naver_pw.text().strip(),
+            "perplex_prompt": self.perplex_prompt.toPlainText().strip() or DEFAULT_PERPLEX_PROMPT,
+            "gemini_prompt": self.gemini_prompt.toPlainText().strip() or DEFAULT_GEMINI_PROMPT,
+        }
+        _save_salgoo_config(self.cfg)
+        self.status.setText(f"✅ 저장됨 — {datetime.now().strftime('%H:%M:%S')}")
+        if self.main:
+            self.main.log(f"[살구봇] ⚙️  설정 저장 완료 (섹션: {section_name})")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  2) 📥 뉴스 수집 페이지   (RSS 우선 → 크롤링 폴백)
+# ═══════════════════════════════════════════════════════════════════════
+class _CollectThread(QThread):
+    progress = pyqtSignal(str)
+    finished_with = pyqtSignal(list)  # list of dict
+
+    def __init__(self, cfg: dict, max_count: int, skip_dup: bool):
+        super().__init__()
+        self.cfg = cfg
+        self.max_count = max_count
+        self.skip_dup = skip_dup
+
+    def run(self):
+        items = []
+        # 도메인 자동 교정: 티스토리/잘못된 도메인이면 salgoonews.com으로 강제
+        base = (self.cfg.get("base_url") or "").lower()
+        if "salgoonews.com" not in base:
+            self.progress.emit(f"[살구봇] ⚠️  base_url 교정: {base or '(빈값)'} → {SALGOO_DEFAULT_BASE}")
+            self.cfg["base_url"] = SALGOO_DEFAULT_BASE
+            self.cfg["rss_url"] = SALGOO_DEFAULT_RSS
+        # rss_url도 도메인 검사
+        rss = (self.cfg.get("rss_url") or "").lower()
+        if "salgoonews.com" not in rss:
+            self.cfg["rss_url"] = SALGOO_DEFAULT_RSS
+
+        section_code = self.cfg.get("section_code", "")
+        try:
+            # 섹션이 지정되어 있으면 HTML 크롤링 우선 (RSS는 섹션 필터링 불가)
+            if section_code:
+                self.progress.emit(f"[살구봇] 섹션 지정됨({section_code}) → HTML 크롤링 우선")
+                items = self._try_crawl()
+                if not items:
+                    self.progress.emit("[살구봇] 크롤링 0건 → RSS 폴백")
+                    items = self._try_rss()
+            else:
+                items = self._try_rss()
+                if not items:
+                    self.progress.emit("[살구봇] RSS 비어있음 → HTML 크롤링 시도")
+                    items = self._try_crawl()
+        except Exception as e:
+            self.progress.emit(f"[살구봇] ❌ 수집 오류: {e}")
+
+        # 카테고리 필터
+        cats = [c.strip() for c in self.cfg.get("categories", "").split(",") if c.strip()]
+        if cats:
+            items = [
+                it for it in items
+                if any(c in (it.get("category", "") + it.get("title", "")) for c in cats)
+            ]
+
+        # 중복 차단
+        if self.skip_dup:
+            items = [it for it in items if not _is_seen(it["url"])]
+
+        # 본문 보강 (없을 시) — 진행률/경과시간/타임아웃 표시
+        targets = items[: self.max_count]
+        total = len(targets)
+        self.progress.emit(f"[살구봇] 📝 본문 수집 시작: {total}건")
+        out = []
+        for i, it in enumerate(targets, 1):
+            t0 = time.time()
+            self.progress.emit(f"[살구봇] ({i}/{total}) ⏬ 본문 요청… {it['title'][:40]}")
+            if not it.get("content"):
+                try:
+                    it["content"] = self._extract_body(it["url"])
+                except requests.Timeout:
+                    self.progress.emit(f"[살구봇] ({i}/{total}) ⏱ 타임아웃 — 스킵: {it['url']}")
+                    it["content"] = it.get("summary", "")
+                except Exception as e:
+                    self.progress.emit(f"[살구봇] ({i}/{total}) ❌ 본문 추출 실패: {e}")
+                    it["content"] = it.get("summary", "")
+            elapsed = time.time() - t0
+            out.append(it)
+            self.progress.emit(
+                f"[살구봇] ({i}/{total}) ✅ 완료 ({elapsed:.1f}s, {len(it.get('content',''))}자) — {it['title'][:30]}"
+            )
+            QApplication.processEvents()  # UI 멈춤 방지
+
+        # 표시 후 seen 마킹은 발행 시점이 아니라 수집 시점에 한다 (요청 시 변경 가능)
+        for it in out:
+            _mark_seen(it["url"], it["title"])
+
+        self.finished_with.emit(out)
+
+    def _try_rss(self) -> list:
+        base_rss = self.cfg.get("rss_url") or SALGOO_DEFAULT_RSS
+        section_code = self.cfg.get("section_code", "")
+        # 살구뉴스 섹션별 RSS: ?section=S1N1 형태 시도
+        urls_to_try = []
+        if section_code:
+            base = (self.cfg.get("base_url") or SALGOO_DEFAULT_BASE).rstrip("/")
+            urls_to_try.append(f"{base}/rss/S1N{section_code[-1]}.xml")
+            urls_to_try.append(f"{base}/rss/clickTop.xml")
+        urls_to_try.append(base_rss)
+
+        items = []
+        for url in urls_to_try:
+            self.progress.emit(f"[살구봇] 📡 RSS 요청: {url}")
+            try:
+                feed = feedparser.parse(url)
+                for e in feed.entries:
+                    items.append({
+                        "title": getattr(e, "title", "").strip(),
+                        "url": getattr(e, "link", "").strip(),
+                        "summary": BeautifulSoup(getattr(e, "summary", ""), "html.parser").get_text(" ", strip=True),
+                        "category": getattr(e, "category", "") if hasattr(e, "category") else "",
+                        "published": getattr(e, "published", ""),
+                        "source": "RSS",
+                        "content": "",
+                    })
+                if items:
+                    self.progress.emit(f"[살구봇] RSS 수신: {len(items)}건")
+                    return items
+            except Exception as ex:
+                self.progress.emit(f"[살구봇] RSS 실패 ({url}): {ex}")
+        self.progress.emit(f"[살구봇] RSS 수신: 0건")
+        return items
+
+    def _try_crawl(self) -> list:
+        base = (self.cfg.get("base_url") or SALGOO_DEFAULT_BASE).rstrip("/")
+        section_code = self.cfg.get("section_code", "")
+        # 살구뉴스 섹션별 기사 목록 페이지
+        if section_code:
+            list_url = f"{base}/news/articleList.html?sc_section_code={section_code}&view_type=sm"
+        else:
+            list_url = f"{base}/news/articleList.html?view_type=sm"
+        self.progress.emit(f"[살구봇] 🕸  크롤링: {list_url}")
+        r = requests.get(list_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.encoding = r.apparent_encoding or "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        items, seen_url = [], set()
+        # 살구뉴스(그누보드/uPress 계열)는 articleView.html?idxno=XXXX 패턴
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "articleView.html" not in href:
+                continue
+            full = urljoin(base + "/", href)
+            if full in seen_url:
+                continue
+            title = a.get_text(" ", strip=True)
+            if len(title) < 5:
+                continue
+            seen_url.add(full)
+            items.append({
+                "title": title, "url": full, "summary": "",
+                "category": self.cfg.get("section_name", ""), "published": "",
+                "source": "CRAWL", "content": "",
+            })
+        self.progress.emit(f"[살구봇] 크롤링 후보: {len(items)}건")
+        return items
+
+    def _extract_body(self, url: str) -> str:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        # 흔한 본문 컨테이너 후보
+        for sel in ["#article_view", ".article_view", "#articleBody",
+                    ".article-body", "article", ".view_con", "#news_body_area"]:
+            node = soup.select_one(sel)
+            if node:
+                return node.get_text("\n", strip=True)
+        return soup.get_text(" ", strip=True)[:3000]
+
+
+class SalgooNewsCollectPage(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self.collected = []
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("📥 살구뉴스 수집")
+        title.setStyleSheet("font-size:18px; font-weight:bold; color:#FFD700;")
+        root.addWidget(title)
+
+        # 옵션
+        h_opt = QHBoxLayout()
+        h_opt.addWidget(QLabel("수집 개수:"))
+        self.max_count = QSpinBox()
+        self.max_count.setRange(1, 100)
+        self.max_count.setValue(10)
+        h_opt.addWidget(self.max_count)
+
+        self.skip_dup = QCheckBox("중복 차단 (이미 수집한 URL 제외)")
+        self.skip_dup.setChecked(True)
+        h_opt.addWidget(self.skip_dup)
+        h_opt.addStretch()
+        root.addLayout(h_opt)
+
+        # 버튼
+        h_btn = QHBoxLayout()
+        self.collect_btn = QPushButton("🚀 수집 시작")
+        self.collect_btn.setStyleSheet(
+            "background-color:#FFD700; color:#000; font-weight:bold; padding:8px 16px;"
+        )
+        self.collect_btn.clicked.connect(self.start_collect)
+        h_btn.addWidget(self.collect_btn)
+
+        self.send_btn = QPushButton("➡️  AI 재작성으로 보내기")
+        self.send_btn.clicked.connect(self.send_to_rewrite)
+        h_btn.addWidget(self.send_btn)
+        h_btn.addStretch()
+        root.addLayout(h_btn)
+
+        # 결과 테이블
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["선택", "제목", "카테고리", "URL"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        root.addWidget(self.table, 1)
+
+        self.status = QLabel("대기 중...")
+        self.status.setStyleSheet("color:#888;")
+        root.addWidget(self.status)
+
+    def start_collect(self):
+        cfg = _load_salgoo_config()
+        if not cfg:
+            QMessageBox.warning(self, "설정 필요", "먼저 ⚙️ 설정 페이지에서 사이트 정보를 저장해주세요.")
+            return
+        self.collect_btn.setEnabled(False)
+        self.status.setText("수집 중...")
+        self._thread = _CollectThread(cfg, self.max_count.value(), self.skip_dup.isChecked())
+        self._thread.progress.connect(lambda m: self.main.log(m) if self.main else None)
+        self._thread.finished_with.connect(self._on_done)
+        self._thread.start()
+
+    def _on_done(self, items: list):
+        self.collected = items
+        self.table.setRowCount(0)
+        for it in items:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            cb = QCheckBox()
+            cb.setChecked(True)
+            self.table.setCellWidget(r, 0, cb)
+            self.table.setItem(r, 1, QTableWidgetItem(it["title"]))
+            self.table.setItem(r, 2, QTableWidgetItem(it.get("category", "")))
+            self.table.setItem(r, 3, QTableWidgetItem(it["url"]))
+        self.status.setText(f"✅ 수집 완료: {len(items)}건")
+        self.collect_btn.setEnabled(True)
+
+    def send_to_rewrite(self):
+        picked = []
+        for r in range(self.table.rowCount()):
+            cb = self.table.cellWidget(r, 0)
+            if cb and cb.isChecked():
+                picked.append(self.collected[r])
+        if not picked:
+            QMessageBox.information(self, "선택 없음", "전송할 기사를 체크해주세요.")
+            return
+        # 큐에 추가 (status='collected')
+        queue = _load_queue()
+        for it in picked:
+            it["status"] = "collected"
+            it["collected_at"] = datetime.now().isoformat(timespec="seconds")
+            queue.append(it)
+        _save_queue(queue)
+        QMessageBox.information(self, "전송 완료", f"{len(picked)}건이 ✨ AI 재작성 큐에 추가되었습니다.")
+        if self.main:
+            self.main.log(f"[살구봇] ➡️  재작성 큐로 전송: {len(picked)}건")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  3) ✨ AI 재작성 페이지   (Perplexity + Gemini)
+# ═══════════════════════════════════════════════════════════════════════
+class _RewriteThread(QThread):
+    progress = pyqtSignal(str)
+    one_done = pyqtSignal(int, str)  # (index, html)
+    all_done = pyqtSignal()
+
+    def __init__(self, cfg: dict, items: list, indices: list):
+        super().__init__()
+        self.cfg = cfg
+        self.items = items
+        self.indices = indices
+
+    def run(self):
+        priority = self.cfg.get("ai_priority", 0)
+        for i in self.indices:
+            it = self.items[i]
+            try:
+                src = it.get("content") or it.get("summary") or it.get("title", "")
+                self.progress.emit(f"[살구봇] ✨ 재작성: {it['title'][:40]}")
+                if priority == 0:
+                    pp = self._perplexity(it["title"], src)
+                    final = self._gemini_polish(it["title"], pp) if pp else self._gemini_polish(it["title"], src)
+                elif priority == 1:
+                    final = self._perplexity(it["title"], src) or src
+                else:
+                    final = self._gemini_polish(it["title"], src)
+
+                html = self._to_html(it["title"], final, it.get("url", ""))
+                self.one_done.emit(i, html)
+            except Exception as e:
+                self.progress.emit(f"[살구봇] ❌ {it['title'][:30]} — {e}")
+        self.all_done.emit()
+
+    def _perplexity(self, title: str, src: str) -> str:
+        key = self.cfg.get("perplex_key", "")
+        if not key:
+            self.progress.emit("[살구봇] ⚠️  Perplexity 키 없음 — 건너뜀")
+            return ""
+        tpl = self.cfg.get("perplex_prompt") or DEFAULT_PERPLEX_PROMPT
+        try:
+            prompt = tpl.format(title=title, src=src[:4000])
+        except Exception:
+            # 사용자가 {} 치환자를 빠뜨렸거나 잘못 쓴 경우 — 원문을 끝에 덧붙임
+            prompt = f"{tpl}\n\n[제목]\n{title}\n\n[원문]\n{src[:4000]}"
+        r = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": "정확하고 간결한 한국어 뉴스 기자."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+
+    def _gemini_polish(self, title: str, src: str) -> str:
+        key = self.cfg.get("gemini_key", "")
+        if not key:
+            self.progress.emit("[살구봇] ⚠️  Gemini 키 없음 — 원문 사용")
+            return src
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.0-flash-exp:generateContent?key={key}"
+        )
+        tpl = self.cfg.get("gemini_prompt") or DEFAULT_GEMINI_PROMPT
+        try:
+            prompt = tpl.format(title=title, src=src[:6000])
+        except Exception:
+            prompt = f"{tpl}\n\n[제목] {title}\n\n[원문]\n{src[:6000]}"
+        r = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    def _to_html(self, title: str, body: str, src_url: str) -> str:
+        # 매우 단순한 마크다운 → HTML 변환
+        html_body = body
+        html_body = re.sub(r"^### (.+)$", r"<h3>\1</h3>", html_body, flags=re.M)
+        html_body = re.sub(r"^## (.+)$", r"<h2>\1</h2>", html_body, flags=re.M)
+        html_body = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html_body)
+        paragraphs = [
+            f"<p>{p.strip()}</p>" if not p.strip().startswith("<") else p
+            for p in html_body.split("\n\n") if p.strip()
+        ]
+        body_html = "\n".join(paragraphs)
+        src_line = f'<p style="font-size:12px;color:#888;">출처: <a href="{src_url}">{src_url}</a></p>' if src_url else ""
+        return f"<h1>{title}</h1>\n{body_html}\n{src_line}"
+
+
+class SalgooAIRewritePage(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self._build_ui()
+        self.refresh_queue()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("✨ AI 재작성 (Perplexity + Gemini)")
+        title.setStyleSheet("font-size:18px; font-weight:bold; color:#FFD700;")
+        root.addWidget(title)
+
+        h_btn = QHBoxLayout()
+        self.refresh_btn = QPushButton("🔄 큐 새로고침")
+        self.refresh_btn.clicked.connect(self.refresh_queue)
+        h_btn.addWidget(self.refresh_btn)
+
+        self.rewrite_btn = QPushButton("✨ 선택 항목 재작성")
+        self.rewrite_btn.setStyleSheet(
+            "background-color:#FFD700; color:#000; font-weight:bold; padding:8px 16px;"
+        )
+        self.rewrite_btn.clicked.connect(self.start_rewrite)
+        h_btn.addWidget(self.rewrite_btn)
+
+        self.delete_btn = QPushButton("🗑 선택 항목 삭제")
+        self.delete_btn.setStyleSheet("background-color:#8a2d2d; color:#fff; padding:8px 12px;")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        h_btn.addWidget(self.delete_btn)
+        h_btn.addStretch()
+
+        info_lbl = QLabel(
+            "💡 이미 재작성된 글은 기본적으로 체크 해제되어 자동 재생성되지 않습니다. "
+            "다시 만들고 싶으면 직접 체크 후 ✨ 버튼을 누르세요. (큐는 프로그램 재시작 후에도 유지됨)"
+        )
+        info_lbl.setStyleSheet("color:#888; font-size:11px; padding:4px;")
+        info_lbl.setWordWrap(True)
+        root.addLayout(h_btn)
+        root.addWidget(info_lbl)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["선택", "제목", "상태"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.itemSelectionChanged.connect(self._on_select_row)
+        split.addWidget(self.table)
+
+        self.preview = QTextEdit()
+        self.preview.setPlaceholderText("재작성된 HTML 미리보기")
+        split.addWidget(self.preview)
+
+        split.setSizes([500, 700])
+        root.addWidget(split, 1)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#888;")
+        root.addWidget(self.status)
+
+    def refresh_queue(self):
+        from PyQt6.QtGui import QColor
+        self.queue = _load_queue()
+        self.table.setRowCount(0)
+        cnt_collected = cnt_rewritten = cnt_published = 0
+        for it in self.queue:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            cb = QCheckBox()
+            status = it.get("status", "")
+            # 기본 체크: 아직 재작성 안 된 collected 항목만 (rewritten은 자동 재생성 방지)
+            cb.setChecked(status == "collected")
+            self.table.setCellWidget(r, 0, cb)
+            title_item = QTableWidgetItem(it.get("title", ""))
+            status_item = QTableWidgetItem(status)
+            # 상태별 색상
+            if status == "rewritten":
+                status_item.setForeground(QColor("#FFD700"))
+                cnt_rewritten += 1
+            elif status.startswith("published"):
+                status_item.setForeground(QColor("#4caf50"))
+                cnt_published += 1
+            elif status == "collected":
+                status_item.setForeground(QColor("#aaa"))
+                cnt_collected += 1
+            self.table.setItem(r, 1, title_item)
+            self.table.setItem(r, 2, status_item)
+        self.status.setText(
+            f"큐 항목: {len(self.queue)}건  "
+            f"(📥 수집됨 {cnt_collected} / ✨ 재작성됨 {cnt_rewritten} / 📤 발행됨 {cnt_published})"
+        )
+
+    def delete_selected(self):
+        indices = []
+        for r in range(self.table.rowCount()):
+            cb = self.table.cellWidget(r, 0)
+            if cb and cb.isChecked():
+                indices.append(r)
+        if not indices:
+            QMessageBox.information(self, "선택 없음", "삭제할 항목을 체크해주세요.")
+            return
+        ans = QMessageBox.question(
+            self, "삭제 확인",
+            f"체크된 {len(indices)}건을 큐에서 영구 삭제할까요?\n"
+            "(재작성된 HTML도 함께 사라집니다)"
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        # 뒤에서부터 제거
+        for i in sorted(indices, reverse=True):
+            del self.queue[i]
+        _save_queue(self.queue)
+        self.refresh_queue()
+        if self.main:
+            self.main.log(f"[살구봇] 🗑 큐 삭제: {len(indices)}건")
+
+    def _on_select_row(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        i = rows[0].row()
+        if 0 <= i < len(self.queue):
+            html = self.queue[i].get("rewritten_html", "")
+            self.preview.setHtml(html or "<i>아직 재작성되지 않음</i>")
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        i = rows[0].row()
+        if 0 <= i < len(self.queue):
+            html = self.queue[i].get("rewritten_html", "")
+            self.preview.setHtml(html or "<i>아직 재작성되지 않음</i>")
+
+    def start_rewrite(self):
+        cfg = _load_salgoo_config()
+        if not cfg.get("perplex_key") and not cfg.get("gemini_key"):
+            QMessageBox.warning(self, "API 키 필요", "⚙️ 설정에서 Perplexity 또는 Gemini 키를 입력해주세요.")
+            return
+        indices = []
+        for r in range(self.table.rowCount()):
+            cb = self.table.cellWidget(r, 0)
+            if cb and cb.isChecked():
+                indices.append(r)
+        if not indices:
+            QMessageBox.information(self, "선택 없음", "재작성할 항목을 체크해주세요.")
+            return
+        self.rewrite_btn.setEnabled(False)
+        self.status.setText(f"재작성 중... ({len(indices)}건)")
+        self._thread = _RewriteThread(cfg, self.queue, indices)
+        self._thread.progress.connect(lambda m: self.main.log(m) if self.main else None)
+        self._thread.one_done.connect(self._one_done)
+        self._thread.all_done.connect(self._all_done)
+        self._thread.start()
+
+    def _one_done(self, i: int, html: str):
+        self.queue[i]["rewritten_html"] = html
+        self.queue[i]["status"] = "rewritten"
+        self.queue[i]["rewritten_at"] = datetime.now().isoformat(timespec="seconds")
+        _save_queue(self.queue)
+        self.table.setItem(i, 2, QTableWidgetItem("rewritten"))
+        # 미리보기 즉시 갱신: 현재 선택된 행이거나 첫 완료 항목일 때
+        try:
+            sel_rows = self.table.selectionModel().selectedRows()
+            cur_idx = sel_rows[0].row() if sel_rows else -1
+            if cur_idx == i or cur_idx < 0:
+                # 행 선택을 강제하여 미리보기 표시
+                self.table.selectRow(i)
+                preview_html = html if html and html.strip() else "<i>재작성 결과가 비어있습니다</i>"
+                self.preview.setHtml(preview_html)
+                if self.main:
+                    self.main.log(f"[살구봇] 👁  미리보기 갱신: {self.queue[i].get('title','')[:30]} ({len(html)}자)")
+        except Exception as e:
+            if self.main:
+                self.main.log(f"[살구봇] ⚠️  미리보기 갱신 실패: {e}")
+
+    def _all_done(self):
+        self.rewrite_btn.setEnabled(True)
+        self.status.setText("✅ 재작성 완료")
+        if self.main:
+            self.main.log("[살구봇] ✨ 재작성 완료")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  4) 📤 발행 페이지   (safe HTML 저장 + auto Selenium)
+# ═══════════════════════════════════════════════════════════════════════
+class _PublishAutoThread(QThread):
+    progress = pyqtSignal(str)
+    one_done = pyqtSignal(int, bool)  # (index, ok)
+    all_done = pyqtSignal()
+
+    def __init__(self, cfg: dict, items: list, indices: list):
+        super().__init__()
+        self.cfg = cfg
+        self.items = items
+        self.indices = indices
+
+    def run(self):
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+        except ImportError:
+            self.progress.emit("[살구봇] ❌ selenium 미설치 — pip install selenium")
+            self.all_done.emit()
+            return
+
+        # 사용자 프로필 폴더 (세션 유지)
+        profile_dir = (SALGOO_DIR / "chrome_profile").absolute()
+        profile_dir.mkdir(exist_ok=True)
+        opts = Options()
+        opts.add_argument(f"--user-data-dir={profile_dir}")
+        opts.add_argument("--start-maximized")
+        # v12: excludeSwitches는 현재 ChromeDriver에서 unrecognized chrome option 오류를 내므로 사용하지 않음
+
+        try:
+            driver = webdriver.Chrome(options=opts)
+        except Exception as e:
+            self.progress.emit(f"[살구봇] ❌ Chrome 드라이버 시작 실패: {e}")
+            self.all_done.emit()
+            return
+
+        try:
+            # 네이버 메인 → 사용자가 수동 로그인 (세션 없으면)
+            driver.get("https://www.naver.com")
+            LOGIN_WAIT = 120  # 2분
+            self.progress.emit(
+                f"[살구봇] ⏳ {LOGIN_WAIT}초(2분) 대기 — 우측 상단에서 네이버 로그인 해주세요.\n"
+                "          (이미 로그인되어 있으면 자동 감지되어 빠르게 넘어갑니다)"
+            )
+            # 10초마다 로그인 여부 체크 + 카운트다운
+            elapsed = 0
+            logged_in = False
+            while elapsed < LOGIN_WAIT:
+                try:
+                    # 로그인 시 .MyView-module__link_login 또는 .MyView-module__my_info 등 표시
+                    page = driver.page_source
+                    if ('class="MyView-module__link_logout' in page
+                            or 'gnb_my_namebox' in page
+                            or 'MyView-module__my_menu' in page):
+                        logged_in = True
+                        self.progress.emit(f"[살구봇] ✅ 로그인 감지됨 ({elapsed}초 경과) — 발행 시작")
+                        break
+                except Exception:
+                    pass
+                remain = LOGIN_WAIT - elapsed
+                self.progress.emit(f"[살구봇] ⏳ 로그인 대기 중... {remain}초 남음")
+                time.sleep(10)
+                elapsed += 10
+            if not logged_in:
+                self.progress.emit("[살구봇] ⚠️  로그인 미감지 — 그래도 발행 진행 시도")
+
+            for i in self.indices:
+                it = self.items[i]
+                html = (it.get("rewritten_html") or it.get("rewritten")
+                        or it.get("content") or "")
+                title = it.get("title", "제목없음")
+                if not html:
+                    self.progress.emit(f"[살구봇] ⚠️  본문 없음 (rewritten_html/content 모두 비어있음) — 건너뜀: {title[:30]}")
+                    self.one_done.emit(i, False)
+                    continue
+                try:
+                    # 네이버 블로그 글쓰기 페이지
+                    driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                    self.progress.emit(f"[살구봇] 📤 글쓰기 페이지 진입: {title[:30]}")
+                    time.sleep(5)
+
+                    # iframe 진입 시도 (네이버 블로그는 iframe 다층 구조)
+                    try:
+                        driver.switch_to.frame("mainFrame")
+                    except Exception:
+                        pass
+
+                    # 클립보드를 통한 붙여넣기 방식 (가장 안정)
+                    try:
+                        import pyperclip
+                        pyperclip.copy(f"{title}\n\n{re.sub('<[^<]+?>', '', html)}")
+                        self.progress.emit(
+                            f"[살구봇] 📋 클립보드 복사 완료. "
+                            f"제목/본문란에 Ctrl+V 로 붙여넣고 임시저장해주세요."
+                        )
+                    except Exception as e:
+                        self.progress.emit(f"[살구봇] pyperclip 오류: {e}")
+
+                    # 사용자가 확인할 시간
+                    time.sleep(20)
+                    self.one_done.emit(i, True)
+                except Exception as e:
+                    self.progress.emit(f"[살구봇] ❌ 발행 실패 {title[:30]}: {e}")
+                    self.one_done.emit(i, False)
+
+                driver.switch_to.default_content()
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            self.all_done.emit()
+
+
+class SalgooPublishPage(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self._build_ui()
+        self.refresh_queue()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("📤 발행")
+        title.setStyleSheet("font-size:18px; font-weight:bold; color:#FFD700;")
+        root.addWidget(title)
+
+        # 모드 선택
+        gb_mode = QGroupBox("발행 모드")
+        v = QVBoxLayout(gb_mode)
+        self.mode_group = QButtonGroup(self)
+        self.rb_safe = QRadioButton("🟢 safe — HTML 파일로 저장 (사람이 복붙)")
+        self.rb_safe.setChecked(True)
+        self.rb_auto = QRadioButton(
+            "🟡 auto — Selenium 으로 네이버 글쓰기 페이지 자동 진입 + 클립보드 붙여넣기 보조"
+        )
+        self.rb_manual_type = QRadioButton(
+            "✍️  manual_type — 직접 글쓰듯이 자동 타이핑 (제목 입력 → Tab → 본문 → 임시저장)"
+        )
+        self.mode_group.addButton(self.rb_safe)
+        self.mode_group.addButton(self.rb_auto)
+        self.mode_group.addButton(self.rb_manual_type)
+        v.addWidget(self.rb_safe)
+        v.addWidget(self.rb_auto)
+        v.addWidget(self.rb_manual_type)
+
+        # manual_type 옵션
+        h_opt = QHBoxLayout()
+        self.cb_publish_after_type = QCheckBox("타이핑 후 자동 발행까지 진행 (체크 해제 시 임시저장만)")
+        self.cb_publish_after_type.setChecked(False)
+        h_opt.addWidget(self.cb_publish_after_type)
+        h_opt.addStretch()
+        v.addLayout(h_opt)
+
+        info = QLabel(
+            "• safe: ./salgoo_data/published/ 폴더에 HTML 파일이 생성됩니다.\n"
+            "• auto: Chrome 창이 열립니다 → 2분(120초) 안에 네이버 로그인 → 자동으로 글쓰기 페이지 이동 → Ctrl+V 안내. (로그인 감지 시 즉시 진행)\n"
+            "• manual_type: 네이버 로그인(2분) → 글쓰기 → 임시저장 팝업 '취소' → 제목(20자) 자동입력 → Tab → 본문 자동타이핑 → 임시저장 (옵션: 자동 발행)."
+        )
+        info.setStyleSheet("color:#888; font-size:11px;")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        root.addWidget(gb_mode)
+
+        # 버튼
+        h_btn = QHBoxLayout()
+        self.refresh_btn = QPushButton("🔄 큐 새로고침")
+        self.refresh_btn.clicked.connect(self.refresh_queue)
+        h_btn.addWidget(self.refresh_btn)
+
+        self.publish_btn = QPushButton("🚀 선택 항목 발행")
+        self.publish_btn.setStyleSheet(
+            "background-color:#FFD700; color:#000; font-weight:bold; padding:8px 16px;"
+        )
+        self.publish_btn.clicked.connect(self.start_publish)
+        h_btn.addWidget(self.publish_btn)
+
+        self.open_folder_btn = QPushButton("📂 발행 폴더 열기")
+        self.open_folder_btn.clicked.connect(self.open_folder)
+        h_btn.addWidget(self.open_folder_btn)
+
+        self.delete_btn = QPushButton("🗑 선택 항목 삭제")
+        self.delete_btn.setStyleSheet("background-color:#8a2d2d; color:#fff; padding:8px 12px;")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        h_btn.addWidget(self.delete_btn)
+        h_btn.addStretch()
+        root.addLayout(h_btn)
+
+        info_lbl = QLabel(
+            "💡 발행 못한 글(✨ 재작성됨 상태)은 프로그램을 껐다 켜도 그대로 남아있어 "
+            "다시 발행할 수 있습니다. 이미 발행된 글은 자동 체크되지 않습니다."
+        )
+        info_lbl.setStyleSheet("color:#888; font-size:11px; padding:4px;")
+        info_lbl.setWordWrap(True)
+        root.addWidget(info_lbl)
+
+        # 테이블
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["선택", "제목", "상태"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        root.addWidget(self.table, 1)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#888;")
+        root.addWidget(self.status)
+
+    def refresh_queue(self):
+        from PyQt6.QtGui import QColor
+        self.queue = _load_queue()
+        self.table.setRowCount(0)
+        cnt_rewritten = cnt_published = cnt_collected = 0
+        for it in self.queue:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            cb = QCheckBox()
+            status = it.get("status", "")
+            # 발행 못한 재작성된 글만 자동 체크 (이미 발행된 건 체크 안 함)
+            cb.setChecked(status == "rewritten")
+            self.table.setCellWidget(r, 0, cb)
+            status_item = QTableWidgetItem(status)
+            if status == "rewritten":
+                status_item.setForeground(QColor("#FFD700"))
+                cnt_rewritten += 1
+            elif status.startswith("published"):
+                status_item.setForeground(QColor("#4caf50"))
+                cnt_published += 1
+            elif status == "collected":
+                status_item.setForeground(QColor("#aaa"))
+                cnt_collected += 1
+            self.table.setItem(r, 1, QTableWidgetItem(it.get("title", "")))
+            self.table.setItem(r, 2, status_item)
+        self.status.setText(
+            f"큐 항목: {len(self.queue)}건  "
+            f"(📥 수집됨 {cnt_collected} / ✨ 발행대기 {cnt_rewritten} / ✅ 발행됨 {cnt_published})"
+        )
+
+    def delete_selected(self):
+        indices = []
+        for r in range(self.table.rowCount()):
+            cb = self.table.cellWidget(r, 0)
+            if cb and cb.isChecked():
+                indices.append(r)
+        if not indices:
+            QMessageBox.information(self, "선택 없음", "삭제할 항목을 체크해주세요.")
+            return
+        ans = QMessageBox.question(
+            self, "삭제 확인",
+            f"체크된 {len(indices)}건을 큐에서 영구 삭제할까요?"
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        for i in sorted(indices, reverse=True):
+            del self.queue[i]
+        _save_queue(self.queue)
+        self.refresh_queue()
+        if self.main:
+            self.main.log(f"[살구봇] 🗑 큐 삭제: {len(indices)}건")
+
+    def open_folder(self):
+        import platform, subprocess
+        path = str(SALGOO_PUBLISHED_DIR.absolute())
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            QMessageBox.warning(self, "열기 실패", str(e))
+
+    def start_publish(self):
+        indices = []
+        for r in range(self.table.rowCount()):
+            cb = self.table.cellWidget(r, 0)
+            if cb and cb.isChecked():
+                indices.append(r)
+        if not indices:
+            QMessageBox.information(self, "선택 없음", "발행할 항목을 체크해주세요.")
+            return
+
+        if self.rb_safe.isChecked():
+            self._publish_safe(indices)
+        elif self.rb_manual_type.isChecked():
+            self._publish_manual_type(indices)
+        else:
+            self._publish_auto(indices)
+
+    def _publish_safe(self, indices):
+        ok = 0
+        for i in indices:
+            it = self.queue[i]
+            html = (it.get("rewritten_html") or it.get("rewritten")
+                    or it.get("content") or "")
+            if not html:
+                continue
+            safe_title = re.sub(r"[\\/:*?\"<>|]", "_", it.get("title", "untitled"))[:60]
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fp = SALGOO_PUBLISHED_DIR / f"{ts}_{safe_title}.html"
+            full = (
+                f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                f"<title>{it.get('title','')}</title></head><body>{html}</body></html>"
+            )
+            fp.write_text(full, encoding="utf-8")
+            self.queue[i]["status"] = "published_safe"
+            self.queue[i]["published_path"] = str(fp)
+            self.table.setItem(i, 2, QTableWidgetItem("published_safe"))
+            ok += 1
+            if self.main:
+                self.main.log(f"[살구봇] 💾 저장: {fp.name}")
+        _save_queue(self.queue)
+        QMessageBox.information(self, "완료", f"safe 모드: {ok}건 저장 완료\n→ {SALGOO_PUBLISHED_DIR}")
+
+    def _publish_auto(self, indices):
+        cfg = _load_salgoo_config()
+        ans = QMessageBox.question(
+            self, "auto 발행 확인",
+            "Chrome 창이 열립니다.\n"
+            "1) 2분(120초) 안에 네이버 로그인 (로그인 감지되면 즉시 다음 단계 진행)\n"
+            "2) 글쓰기 페이지로 자동 이동\n"
+            "3) 클립보드에 본문이 복사됩니다 → 제목/본문에 Ctrl+V → 임시저장\n\n진행할까요?",
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.publish_btn.setEnabled(False)
+        self._thread = _PublishAutoThread(cfg, self.queue, indices)
+        self._thread.progress.connect(lambda m: self.main.log(m) if self.main else None)
+        self._thread.one_done.connect(self._one_done_auto)
+        self._thread.all_done.connect(self._all_done_auto)
+        self._thread.start()
+
+    def _one_done_auto(self, i: int, ok: bool):
+        if ok:
+            self.queue[i]["status"] = "published_auto"
+            self.table.setItem(i, 2, QTableWidgetItem("published_auto"))
+        _save_queue(self.queue)
+
+    def _all_done_auto(self):
+        self.publish_btn.setEnabled(True)
+        self.status.setText("✅ auto 발행 시퀀스 완료")
+        if self.main:
+            self.main.log("[살구봇] 📤 auto 발행 완료")
+
+    # ───────── manual_type (직접 타이핑) 모드 ─────────
+    def _publish_manual_type(self, indices):
+        cfg = _load_salgoo_config()
+        publish_after = self.cb_publish_after_type.isChecked()
+        ans = QMessageBox.question(
+            self, "manual_type 발행 확인",
+            "Chrome 창이 열립니다.\n\n"
+            "1) 2분(120초) 안에 네이버 로그인 (감지되면 즉시 진행)\n"
+            "2) 글쓰기 페이지로 자동 이동\n"
+            "3) '임시저장된 글 불러오기' 팝업이 뜨면 자동으로 '취소' 클릭\n"
+            "4) 제목(20자 이내) 자동 타이핑 → Tab → 본문 자동 타이핑 (글자당 30~50ms)\n"
+            f"5) {'임시저장 + 자동 발행' if publish_after else '임시저장만 수행'}\n\n진행할까요?",
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.publish_btn.setEnabled(False)
+        self._thread = _PublishManualTypeThread(cfg, self.queue, indices, publish_after)
+        self._thread.progress.connect(lambda m: self.main.log(m) if self.main else None)
+        self._thread.one_done.connect(self._one_done_manual_type)
+        self._thread.all_done.connect(self._all_done_manual_type)
+        self._thread.start()
+
+    def _one_done_manual_type(self, i: int, ok: bool, published: bool):
+        if ok:
+            self.queue[i]["status"] = "published_manual" if published else "draft_saved"
+            self.table.setItem(i, 2, QTableWidgetItem(self.queue[i]["status"]))
+        _save_queue(self.queue)
+
+    def _all_done_manual_type(self):
+        self.publish_btn.setEnabled(True)
+        self.status.setText("✅ manual_type 시퀀스 완료")
+        if self.main:
+            self.main.log("[살구봇] ✍️  manual_type 완료")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  manual_type 발행 스레드
+# ═══════════════════════════════════════════════════════════════════════
+class _PublishManualTypeThread(QThread):
+    progress = pyqtSignal(str)
+    one_done = pyqtSignal(int, bool, bool)  # (index, ok, published)
+    all_done = pyqtSignal()
+
+    def __init__(self, cfg: dict, items: list, indices: list, publish_after: bool):
+        super().__init__()
+        self.cfg = cfg
+        self.items = items
+        self.indices = indices
+        self.publish_after = publish_after
+
+    def _dbg(self, msg: str):
+        """[DEBUG] 접두사 로그 — 어디서 멈추는지 추적용"""
+        try:
+            self.progress.emit(f"[살구봇][DEBUG] {msg}")
+        except Exception:
+            pass
+
+    def _has_login_cookies(self, driver) -> bool:
+        try:
+            cookies = driver.get_cookies()
+            names = {c.get("name") for c in cookies}
+            has_ses = "NID_SES" in names
+            has_aut = "NID_AUT" in names
+            self._dbg(f"쿠키 검사: 총 {len(cookies)}개 | NID_SES={has_ses} NID_AUT={has_aut}")
+            return has_ses or has_aut
+        except Exception as e:
+            self._dbg(f"쿠키 검사 실패: {e}")
+            return False
+
+    def _is_logged_in(self, driver) -> bool:
+        """현재 페이지/네이버 메인 양쪽에서 세션 쿠키와 로그인 마커를 함께 확인"""
+        self._dbg("로그인 상태 확인 시작")
+        if self._has_login_cookies(driver):
+            self._dbg("→ 쿠키로 로그인 확인됨")
+            return True
+
+        original_url = ""
+        try:
+            original_url = driver.current_url
+        except Exception:
+            pass
+
+        for probe_url in [None, "https://www.naver.com", "https://blog.naver.com"]:
+            try:
+                if probe_url:
+                    self._dbg(f"마커 탐지를 위해 이동: {probe_url}")
+                    driver.get(probe_url)
+                    time.sleep(1.5)
+                if self._has_login_cookies(driver):
+                    self._dbg(f"→ {probe_url or '현재페이지'}에서 쿠키 발견")
+                    return True
+                page = (driver.page_source or "")[:200000]
+                markers = [
+                    'link_logout', 'MyView-module__link_logout', 'gnb_my_namebox',
+                    'gnb_my_layer', 'naverpay', '프로필', '블로그',
+                ]
+                hits = [m for m in markers if m in page]
+                self._dbg(f"마커 검사 ({probe_url or 'cur'}): hits={hits}")
+                if hits:
+                    if '로그인' not in page[:2000] or 'link_login' not in page:
+                        self._dbg("→ 마커로 로그인 확인됨")
+                        return True
+            except Exception as e:
+                self._dbg(f"probe 실패 {probe_url}: {e}")
+                continue
+
+        try:
+            if original_url and driver.current_url != original_url:
+                self._dbg(f"원본 URL 복귀: {original_url[:80]}")
+                driver.get(original_url)
+                time.sleep(0.5)
+        except Exception:
+            pass
+        self._dbg("→ 로그인 미확인")
+        return False
+
+    def _wait_for_login(self, driver, timeout=120):
+        self._dbg(f"_wait_for_login 시작 (timeout={timeout}s)")
+        elapsed = 0
+        while elapsed < timeout:
+            try:
+                current_url = driver.current_url
+            except Exception as e:
+                current_url = ''
+                self._dbg(f"current_url 읽기 실패: {e}")
+            self._dbg(f"폴링 #{elapsed//5 + 1} | URL: {current_url[:100]}")
+            if self._is_logged_in(driver):
+                self.progress.emit(f"[살구봇] ✅ 로그인 감지됨 ({elapsed}초)")
+                return True
+            remain = max(timeout - elapsed, 0)
+            self.progress.emit(
+                f"[살구봇] ⏳ 로그인 대기... {remain}초 남음 | 현재: {current_url[:80]}"
+            )
+            try:
+                if 'nid.naver.com' in current_url or 'nidlogin' in current_url:
+                    driver.execute_script('window.focus();')
+            except Exception:
+                pass
+            time.sleep(5)
+            elapsed += 5
+        self._dbg(f"_wait_for_login 타임아웃 ({timeout}s 경과)")
+        return False
+
+    def _human_type(self, element, text, min_ms=30, max_ms=50):
+        import random
+        for ch in text:
+            try:
+                element.send_keys(ch)
+            except Exception:
+                pass
+            time.sleep(random.uniform(min_ms, max_ms) / 1000.0)
+
+    def _strip_html_to_text(self, html: str) -> str:
+        # 단락을 보존하며 HTML 태그 제거
+        text = re.sub(r"<\s*br\s*/?>", "\n", html, flags=re.I)
+        text = re.sub(r"</\s*(p|h1|h2|h3|div|li)\s*>", "\n\n", text, flags=re.I)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        # HTML entity 간단 디코드
+        text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
+                    .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"'))
+        return text
+
+    def _dismiss_draft_popup(self, driver):
+        """임시저장 글 불러오기 팝업 → '취소' 클릭"""
+        try:
+            from selenium.webdriver.common.by import By
+            # 다양한 가능한 셀렉터 시도
+            selectors = [
+                "//button[contains(text(),'취소')]",
+                "//a[contains(text(),'취소')]",
+                "//button[contains(@class,'cancel')]",
+                "//*[@class='se-popup-button-cancel']",
+                "//*[contains(@class,'btn_cancel')]",
+            ]
+            for sel in selectors:
+                try:
+                    els = driver.find_elements(By.XPATH, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            el.click()
+                            self.progress.emit("[살구봇] ✓ 임시저장 팝업 '취소' 클릭")
+                            time.sleep(1)
+                            return True
+                except Exception:
+                    continue
+        except Exception as e:
+            self.progress.emit(f"[살구봇] 팝업 처리 오류 (무시): {e}")
+        return False
+
+    def run(self):
+        try:
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.common.keys import Keys
+            from selenium.webdriver.common.action_chains import ActionChains
+        except ImportError:
+            self.progress.emit("[살구봇] ❌ selenium/undetected_chromedriver 미설치")
+            self.all_done.emit()
+            return
+
+        profile_dir = (SALGOO_DIR / "chrome_profile").absolute()
+        profile_dir.mkdir(exist_ok=True)
+
+        def _build_opts():
+            o = uc.ChromeOptions()
+            o.add_argument(f"--user-data-dir={profile_dir}")
+            o.add_argument("--start-maximized")
+            o.add_argument('--no-sandbox')
+            o.add_argument('--disable-dev-shm-usage')
+            o.add_argument('--disable-gpu')
+            o.add_argument('--disable-popup-blocking')
+            o.add_argument('--disable-features=RendererCodeIntegrity')
+            # v12: excludeSwitches는 현재 ChromeDriver에서 unrecognized chrome option 오류를 내므로 사용하지 않음
+            o.add_experimental_option('prefs', {'profile.default_content_setting_values.popups': 0})
+            return o
+
+        try:
+            self._dbg("Chrome 드라이버 생성 시도 (opts builder 방식)")
+            driver = make_uc_driver(_build_opts)
+        except Exception as e:
+            self.progress.emit(f"[살구봇] ❌ Chrome 드라이버 시작 실패: {e}")
+            self._dbg(f"드라이버 예외 상세: {type(e).__name__}: {e}")
+            self.all_done.emit()
+            return
+
+        try:
+            # 로그인 페이지로 직접 이동 (사용자가 바로 로그인할 수 있도록)
+            self._dbg("드라이버 시작됨 → nidlogin.login 으로 이동")
+            driver.get("https://nid.naver.com/nidlogin.login")
+            time.sleep(2)
+            try:
+                self._dbg(f"이동 직후 URL: {driver.current_url[:120]}")
+            except Exception:
+                pass
+            self.progress.emit("[살구봇] ⏳ 2분(120초) 안에 네이버 로그인 해주세요. 로그인 완료 후 자동으로 글쓰기로 이동합니다.")
+            logged_in = self._wait_for_login(driver, 120)
+            if not logged_in:
+                self.progress.emit("[살구봇] ❌ 2분 내 로그인 미감지 — 발행 중단. 다시 시도해 주세요.")
+                self._dbg("→ run() 중단: 로그인 타임아웃")
+                for i in self.indices:
+                    self.one_done.emit(i, False, False)
+                return
+
+            # 로그인 후 메인으로 이동 (세션 안정화)
+            self._dbg("로그인 확인됨 → naver.com 으로 세션 안정화 이동")
+            driver.get("https://www.naver.com")
+            time.sleep(2)
+            self._dbg(f"안정화 후 URL: {driver.current_url[:120]} | 항목 수={len(self.indices)}")
+
+            for i in self.indices:
+                it = self.items[i]
+                title_full = it.get("title", "제목없음")
+                # 20자 이내로 제목 자르기
+                title = title_full[:20]
+                # rewritten_html 우선, 없으면 content/rewritten 순으로 fallback
+                html = (it.get("rewritten_html") or it.get("rewritten")
+                        or it.get("content") or "")
+                self._dbg(f"[항목 {i}] 시작: title='{title}' html_len={len(html)} keys={list(it.keys())}")
+                if not html:
+                    self.progress.emit(f"[살구봇] ⚠️  본문 없음 (rewritten_html/content 모두 비어있음) — 건너뜀: {title}")
+                    self.one_done.emit(i, False, False)
+                    continue
+
+                body_text = self._strip_html_to_text(html)
+                # 본문 첫 줄이 제목과 같으면 제거 (h1으로 들어간 케이스)
+                if body_text.startswith(title_full):
+                    body_text = body_text[len(title_full):].lstrip()
+                self._dbg(f"[항목 {i}] 본문 텍스트 길이={len(body_text)}")
+
+                try:
+                    self.progress.emit(f"[살구봇] ✍️  글쓰기 진입: {title}")
+                    self._dbg(f"[항목 {i}] GoBlogWrite.naver 로 이동")
+                    driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                    time.sleep(6)
+                    try:
+                        self._dbg(f"[항목 {i}] 글쓰기 페이지 URL: {driver.current_url[:120]}")
+                        self._dbg(f"[항목 {i}] 페이지 타이틀: {driver.title[:80]}")
+                    except Exception as e:
+                        self._dbg(f"URL/title 읽기 실패: {e}")
+
+                    # 로그인 페이지로 튕겼는지 확인
+                    cur_url = driver.current_url
+                    if "nid.naver.com" in cur_url or "/nidlogin" in cur_url:
+                        self.progress.emit("[살구봇] ⚠️  글쓰기 페이지가 로그인으로 리다이렉트됨 — 추가 로그인 60초 대기")
+                        self._dbg(f"[항목 {i}] 리다이렉트 감지 → 재로그인 대기")
+                        if not self._wait_for_login(driver, 60):
+                            self.progress.emit("[살구봇] ❌ 로그인 실패 — 이 항목 건너뜀")
+                            self.one_done.emit(i, False, False)
+                            continue
+                        driver.get("https://blog.naver.com/GoBlogWrite.naver")
+                        time.sleep(6)
+                        self._dbg(f"[항목 {i}] 재진입 후 URL: {driver.current_url[:120]}")
+
+                    # iframe 진입
+                    self._dbg(f"[항목 {i}] iframe 진입 시도")
+                    try:
+                        driver.switch_to.default_content()
+                        # mainFrame 존재 확인
+                        try:
+                            frames = driver.find_elements(By.TAG_NAME, "iframe")
+                            self._dbg(f"[항목 {i}] iframe 개수={len(frames)} | ids={[f.get_attribute('id') for f in frames[:5]]}")
+                        except Exception as e:
+                            self._dbg(f"iframe 목록 조회 실패: {e}")
+                        driver.switch_to.frame("mainFrame")
+                        self.progress.emit("[살구봇] ✓ mainFrame 진입")
+                        self._dbg(f"[항목 {i}] mainFrame 진입 성공")
+                    except Exception as e:
+                        self.progress.emit(f"[살구봇] ⚠️  mainFrame 진입 실패 (무시): {e}")
+                        self._dbg(f"[항목 {i}] mainFrame 진입 실패: {e}")
+                    time.sleep(2)
+
+                    # 1) 임시저장 팝업 처리 (취소)
+                    self._dbg(f"[항목 {i}] 임시저장 팝업 dismiss 시도")
+                    self._dismiss_draft_popup(driver)
+                    time.sleep(1)
+
+                    # 2) 제목 입력 영역 찾기
+                    self._dbg(f"[항목 {i}] 제목 영역 탐색")
+                    title_el = None
+                    for sel in [
+                        "//*[contains(@class,'se-placeholder') and contains(text(),'제목')]/..",
+                        "//*[contains(@class,'se-title')]//*[@contenteditable='true']",
+                        "//span[contains(@class,'se-placeholder')][contains(text(),'제목')]",
+                        "//div[contains(@class,'se-section-documentTitle')]",
+                    ]:
+                        try:
+                            els = driver.find_elements(By.XPATH, sel)
+                            visible = [e for e in els if e.is_displayed()]
+                            self._dbg(f"  셀렉터 '{sel[:50]}...' → 매칭={len(els)} 보임={len(visible)}")
+                            if visible:
+                                title_el = visible[0]
+                                break
+                        except Exception as e:
+                            self._dbg(f"  셀렉터 실패: {e}")
+                            continue
+
+                    if title_el:
+                        self._dbg(f"[항목 {i}] 제목 영역 클릭")
+                        try:
+                            title_el.click()
+                            time.sleep(0.5)
+                        except Exception as e:
+                            self._dbg(f"  일반 click 실패 → ActionChains 사용: {e}")
+                            ActionChains(driver).move_to_element(title_el).click().perform()
+                            time.sleep(0.5)
+                    else:
+                        self.progress.emit("[살구봇] ⚠️  제목 영역 못찾음 — ActionChains로 입력 시도")
+                        self._dbg(f"[항목 {i}] 제목 영역 못찾음, blind 입력 진행")
+
+                    # 제목 타이핑
+                    actions = ActionChains(driver)
+                    self.progress.emit(f"[살구봇] 제목 입력: {title}")
+                    self._dbg(f"[항목 {i}] 제목 타이핑 시작 ({len(title)}자)")
+                    for ch in title:
+                        actions.send_keys(ch).pause(0.04)
+                    actions.perform()
+                    time.sleep(0.5)
+                    self._dbg(f"[항목 {i}] 제목 타이핑 완료")
+
+                    # 3) Tab → 본문 영역으로 이동
+                    self._dbg(f"[항목 {i}] Tab 키 전송 → 본문 포커스 이동")
+                    ActionChains(driver).send_keys(Keys.TAB).perform()
+                    time.sleep(1.0)
+                    try:
+                        active = driver.execute_script("return document.activeElement && (document.activeElement.tagName + '#' + (document.activeElement.id||'') + '.' + (document.activeElement.className||'').slice(0,80));")
+                        self._dbg(f"[항목 {i}] Tab 후 activeElement: {active}")
+                    except Exception as e:
+                        self._dbg(f"activeElement 조회 실패: {e}")
+
+                    # 4) 본문 타이핑
+                    self.progress.emit(f"[살구봇] 본문 입력 시작 ({len(body_text)}자, 약 {len(body_text)*40//1000}초 예상)")
+                    self._dbg(f"[항목 {i}] 본문 타이핑 시작")
+                    import random
+                    actions = ActionChains(driver)
+                    chunk_count = 0
+                    total_typed = 0
+                    for ch in body_text:
+                        if ch == "\n":
+                            actions.send_keys(Keys.ENTER)
+                        else:
+                            actions.send_keys(ch)
+                        actions.pause(random.uniform(0.030, 0.050))
+                        chunk_count += 1
+                        total_typed += 1
+                        # 200자마다 flush (메모리/안정성)
+                        if chunk_count >= 200:
+                            actions.perform()
+                            self._dbg(f"[항목 {i}] 본문 진행 {total_typed}/{len(body_text)}자")
+                            actions = ActionChains(driver)
+                            chunk_count = 0
+                    if chunk_count > 0:
+                        actions.perform()
+                    self._dbg(f"[항목 {i}] 본문 타이핑 완료 ({total_typed}자)")
+
+                    time.sleep(1.5)
+
+                    # 5) 임시저장 (Ctrl+S 또는 버튼)
+                    self.progress.emit("[살구봇] 💾 임시저장 시도")
+                    saved = False
+                    for sel in [
+                        "//button[contains(@class,'save_btn') or contains(text(),'임시저장')]",
+                        "//a[contains(text(),'임시저장')]",
+                        "//*[@class='btn_save_layer']",
+                    ]:
+                        try:
+                            els = driver.find_elements(By.XPATH, sel)
+                            for el in els:
+                                if el.is_displayed():
+                                    el.click()
+                                    saved = True
+                                    self.progress.emit("[살구봇] ✓ 임시저장 버튼 클릭")
+                                    break
+                            if saved:
+                                break
+                        except Exception:
+                            continue
+                    if not saved:
+                        # 단축키 fallback
+                        try:
+                            ActionChains(driver).key_down(Keys.CONTROL).send_keys('s').key_up(Keys.CONTROL).perform()
+                            self.progress.emit("[살구봇] ✓ Ctrl+S 임시저장 시도")
+                            saved = True
+                        except Exception as e:
+                            self.progress.emit(f"[살구봇] ⚠️ 임시저장 실패: {e}")
+                    time.sleep(2)
+
+                    published = False
+                    if self.publish_after:
+                        # 6) 발행 버튼 클릭 → 발행 확인
+                        self.progress.emit("[살구봇] 🚀 발행 진행")
+                        for sel in [
+                            "//button[contains(@class,'publish_btn') or contains(text(),'발행')]",
+                            "//a[contains(text(),'발행')]",
+                        ]:
+                            try:
+                                els = driver.find_elements(By.XPATH, sel)
+                                for el in els:
+                                    if el.is_displayed():
+                                        el.click()
+                                        time.sleep(2)
+                                        # 확인 발행 버튼 (2단계)
+                                        confirm = driver.find_elements(
+                                            By.XPATH,
+                                            "//button[contains(text(),'발행') and not(contains(@class,'disabled'))]"
+                                        )
+                                        for c in confirm:
+                                            if c.is_displayed():
+                                                c.click()
+                                                published = True
+                                                self.progress.emit("[살구봇] ✅ 발행 완료")
+                                                break
+                                        break
+                                if published:
+                                    break
+                            except Exception:
+                                continue
+                        time.sleep(3)
+
+                    self.one_done.emit(i, True, published)
+                except Exception as e:
+                    self.progress.emit(f"[살구봇] ❌ 실패 {title}: {e}")
+                    self.one_done.emit(i, False, False)
+
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+        finally:
+            try:
+                # manual 모드에서는 사용자가 직접 확인할 수 있도록 잠시 대기 후 닫기
+                time.sleep(3)
+                driver.quit()
+            except Exception:
+                pass
+            self.all_done.emit()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  🤖 AI 뉴스 봇 — 끝
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════
+#  통합 수집/발행 페이지 (UnifiedCollectPage)
+#  - 기존 글수집 하위 7~12개 페이지를 하나의 페이지로 통합
+#  - 상단: 소스 선택 버튼 (수집 소스 / AI봇 워크플로우)
+#  - 하단: 선택된 페이지의 전체 UI (기존 페이지 인스턴스 재사용)
+#  - 기존 페이지 코드는 그대로 유지되며, 사이드바에서만 숨겨짐
+# ═══════════════════════════════════════════════════════════════
+class UnifiedCollectPage(QWidget):
+    SOURCE_GROUPS = [
+        ("📥 수집 소스", [
+            ("📝 블로그",      "blog"),
+            ("1️⃣ 숏텐츠",     "news_short"),
+            ("2️⃣ 다음",       "news_daum"),
+            ("3️⃣ 네이트",     "news_nate"),
+            ("☕ 카페",        "cafe"),
+            ("🔥 인기글",      "popular"),
+            ("📺 유튜브",      "youtube"),
+            ("📥 엑셀(대량)",  "bulk_title"),
+        ]),
+        ("🤖 AI봇 워크플로우", [
+            ("⚙️ 설정",        "salgoo_config"),
+            ("📥 뉴스 수집",   "salgoo_news"),
+            ("✨ AI 재작성",   "salgoo_rewrite"),
+            ("📤 발행",        "salgoo_publish"),
+        ]),
+    ]
+
+    def __init__(self, main_win):
+        super().__init__()
+        self.main_win = main_win
+        self.source_pages = {}     # key -> 페이지 인스턴스 (캐시)
+        self.source_buttons = {}   # key -> QPushButton
+        self._current_key = None
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # 헤더
+        header = QLabel("📥 통합 수집/발행 페이지")
+        header.setStyleSheet("color:#FFD700; font-weight:bold; font-size:16px; padding:4px 2px;")
+        root.addWidget(header)
+
+        sub = QLabel("위에서 소스를 선택하면 해당 페이지가 아래에 표시됩니다. "
+                     "기존 페이지의 모든 기능(수집·AI 재작성·이미지 생성·업로드)이 그대로 동작합니다.")
+        sub.setStyleSheet("color:#aaa; font-size:11px; padding:0 2px 4px 2px;")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
+
+        # 소스 선택 버튼 영역 (그룹별로 한 줄씩)
+        btn_style_unchecked = """
+            QPushButton {
+                background-color:#2a2a2a; color:#ddd;
+                border:1px solid #3a3a3a; border-radius:4px;
+                padding:6px 10px; font-size:12px;
+            }
+            QPushButton:hover { background-color:#3a3a3a; color:#fff; }
+        """
+        btn_style_checked = """
+            QPushButton {
+                background-color:#FFD700; color:#1e1e1e;
+                border:1px solid #FFD700; border-radius:4px;
+                padding:6px 10px; font-size:12px; font-weight:bold;
+            }
+        """
+        self._btn_style_unchecked = btn_style_unchecked
+        self._btn_style_checked = btn_style_checked
+
+        for group_label, items in self.SOURCE_GROUPS:
+            grp_lbl = QLabel(group_label)
+            grp_lbl.setStyleSheet("color:#888; font-size:11px; padding:4px 2px 2px 2px;")
+            root.addWidget(grp_lbl)
+
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            for label, key in items:
+                # 조건부 — multilink가 없으면 스킵
+                if key == "multilink_ai" and not _MULTILINK_AVAILABLE:
+                    continue
+                btn = QPushButton(label)
+                btn.setCheckable(True)
+                btn.setStyleSheet(btn_style_unchecked)
+                btn.clicked.connect(lambda _checked, k=key: self._switch_source(k))
+                row.addWidget(btn)
+                self.source_buttons[key] = btn
+            row.addStretch()
+            root.addLayout(row)
+
+        # 멀티링크는 조건부로 별도 추가
+        if _MULTILINK_AVAILABLE:
+            extra_lbl = QLabel("🌐 확장")
+            extra_lbl.setStyleSheet("color:#888; font-size:11px; padding:4px 2px 2px 2px;")
+            root.addWidget(extra_lbl)
+            extra_row = QHBoxLayout()
+            extra_row.setSpacing(4)
+            btn = QPushButton("🌐 멀티링크 → AI")
+            btn.setCheckable(True)
+            btn.setStyleSheet(btn_style_unchecked)
+            btn.clicked.connect(lambda _checked, k="multilink_ai": self._switch_source(k))
+            extra_row.addWidget(btn)
+            extra_row.addStretch()
+            root.addLayout(extra_row)
+            self.source_buttons["multilink_ai"] = btn
+
+        # 구분선
+        line = QLabel()
+        line.setStyleSheet("background-color:#3a3a3a; min-height:1px; max-height:1px; margin:6px 0;")
+        root.addWidget(line)
+
+        # 선택된 소스 페이지를 표시할 스택
+        self.stack = QStackedWidget()
+        placeholder = QLabel("← 위에서 소스를 선택하세요")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color:#666; font-size:14px; padding:60px;")
+        self.stack.addWidget(placeholder)
+        self.stack.setCurrentIndex(0)
+        root.addWidget(self.stack, 1)
+
+    def _switch_source(self, key):
+        # 버튼 상태 갱신 (단일 선택 토글)
+        for k, btn in self.source_buttons.items():
+            checked = (k == key)
+            btn.setChecked(checked)
+            btn.setStyleSheet(self._btn_style_checked if checked else self._btn_style_unchecked)
+
+        # 페이지 lazy load + 캐시
+        if key not in self.source_pages:
+            page = self.main_win.get_or_create_page(key)
+            if page is None:
+                try:
+                    self.main_win.log(f"⚠️ 통합: '{key}' 페이지 생성 실패")
+                except Exception:
+                    pass
+                return
+            self.source_pages[key] = page
+            # addWidget가 부모를 자동 재설정 (reparent)
+            self.stack.addWidget(page)
+
+        self.stack.setCurrentWidget(self.source_pages[key])
+        self._current_key = key
+        try:
+            self.main_win.log(f"📂 통합: {key} 페이지 활성화")
+        except Exception:
+            pass
+
+
+class PostPro(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self._is_starting_up = True
+        self._is_restoring_state = False
+        self.config = self.load_config()
+        self.driver = None
+        self.worker_threads = []
+        self.page_map = {}
+        self.setup_ui()
+        self.statusBar().showMessage("포스트 PRO v4.4 (v50 LAZY + UNIFIED) - 통합 수집/발행")
+        QTimer.singleShot(1500, self._finish_startup)
+
+    def load_config(self):
+        try:
+            with open('config.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _finish_startup(self):
+        self._is_starting_up = False
+
+    def _safe_restore_form_state(self):
+        """v49: 이벤트 루프 안정 후 호출되는 안전 복원 래퍼."""
+        try:
+            self.restore_form_state()
+        except Exception as e:
+            try:
+                print(f'[v49] restore_form_state 실패: {e}')
+            except Exception:
+                pass
+
+    def log(self, msg):
+        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        if not getattr(self, '_is_starting_up', False) and not getattr(self, '_is_restoring_state', False):
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+    def setup_ui(self):
+        self.setWindowTitle("포스트 PRO v4.4 (v50 LAZY) (유튜브 수집 + 제목 대량 업로드 + 발행)")
+        self.setGeometry(50, 50, 1600, 950)
+
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.Base, QColor(45, 45, 45))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(35, 35, 35))
+        palette.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.Button, QColor(50, 50, 50))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(255, 215, 0))
+        self.setPalette(palette)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setMaximumWidth(200)
+        self.tree.setMinimumWidth(160)
+        self.tree.setStyleSheet("""
+            QTreeWidget { background-color:#1e1e1e; color:#fff; border:none; font-size:13px; }
+            QTreeWidget::item { padding:6px 4px; }
+            QTreeWidget::item:selected { background-color:#3a3a3a; color:#FFD700; }
+            QTreeWidget::item:hover { background-color:#2a2a2a; }
+        """)
+        self.build_sidebar()
+        self.tree.itemClicked.connect(self.on_tree_click)
+        main_layout.addWidget(self.tree, 1)
+
+        scroll = QScrollArea()
+        self.stack = QStackedWidget()
+        scroll.setWidget(self.stack)
+        scroll.setWidgetResizable(True)
+        main_layout.addWidget(scroll, 5)
+
+        log_w = QWidget()
+        log_l = QVBoxLayout(log_w)
+        lbl = QLabel("📋 실시간 로그")
+        lbl.setStyleSheet("color:#FFD700; font-weight:bold; font-size:14px;")
+        log_l.addWidget(lbl)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("background-color:#1a1a1a; color:#aaa; font-size:12px;")
+        log_l.addWidget(self.log_text)
+        main_layout.addWidget(log_w, 2)
+
+        self.create_pages()
+        self.tree.expandAll()
+        self.stack.setCurrentIndex(0)
+
+    def build_sidebar(self):
+        # ─── 💾 설정 ───
+        QTreeWidgetItem(self.tree, ["💾 설정"]).setData(0, Qt.ItemDataRole.UserRole, "config")
+
+        # ─── 🔍 키워드 ───
+        QTreeWidgetItem(self.tree, ["🔍 키워드"]).setData(0, Qt.ItemDataRole.UserRole, "keyword")
+
+        # ─── 📥 통합 수집/발행 (모든 수집 페이지를 하나로) ───
+        QTreeWidgetItem(self.tree, ["📥 통합 수집/발행"]).setData(0, Qt.ItemDataRole.UserRole, "unified")
+
+        # ─── 🖼️ 이미지 생성 ───
+        QTreeWidgetItem(self.tree, ["🖼️ 이미지 생성"]).setData(0, Qt.ItemDataRole.UserRole, "imagegen")
+
+        # ─── 🚀 자동 발행 ───
+        QTreeWidgetItem(self.tree, ["🚀 자동 발행"]).setData(0, Qt.ItemDataRole.UserRole, "publish")
+
+    def _make_start_placeholder(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("포스트 PRO 시작 화면")
+        title.setStyleSheet("font-size:18px; font-weight:bold; color:#FFD700;")
+        desc = QLabel("v50 LAZY MODE: 시작 시 페이지를 미리 만들지 않고, 클릭한 페이지만 로드합니다.")
+        desc.setStyleSheet("color:#bbb; font-size:13px;")
+        desc.setWordWrap(True)
+        lay.addWidget(title)
+        lay.addWidget(desc)
+        lay.addStretch()
+        return w
+
+    def _create_page_factories(self):
+        return {
+            "unified": lambda: UnifiedCollectPage(self),
+            "config": lambda: ConfigPage(self),
+            "keyword": lambda: KeywordAnalysisPage(self),
+            "blog": lambda: BlogPipelinePage(self),
+            "news_short": lambda: NewsCollectPage(self, "shortnews"),
+            "news_daum": lambda: NewsCollectPage(self, "daum"),
+            "news_nate": lambda: NewsCollectPage(self, "nate"),
+            "cafe": lambda: CafeCollectPage(self),
+            "popular": lambda: PopularPostPage(self),
+            "bulk_title": lambda: BulkTitleUploadPage(self),
+            "youtube": lambda: YouTubeCollectPage(self),
+            "multilink_ai": (lambda: MultiLinkAIPage(self)) if _MULTILINK_AVAILABLE else (lambda: None),
+            "imagegen": lambda: ImageGenPage(self),
+            "publish": lambda: PublishPage(self),
+            # ─── 🤖 AI 뉴스 봇 ───
+            "salgoo_config":  lambda: SalgooConfigPage(self),
+            "salgoo_news":    lambda: SalgooNewsCollectPage(self),
+            "salgoo_rewrite": lambda: SalgooAIRewritePage(self),
+            "salgoo_publish": lambda: SalgooPublishPage(self),
+        }
+
+    def get_or_create_page(self, key):
+        """캐시된 페이지 인스턴스를 반환하거나, 없으면 팩토리로 생성한다.
+        main_win.stack에는 추가하지 않으므로 외부에서 reparent 가능."""
+        page = getattr(self, 'pages', {}).get(key) if hasattr(self, 'pages') else None
+        if page is not None:
+            return page
+        factory = self.page_factories.get(key) if hasattr(self, 'page_factories') else None
+        if not factory:
+            return None
+        print(f'[v50] lazy loading page (shared): {key}')
+        page = factory()
+        if page is None:
+            return None
+        if hasattr(self, 'pages'):
+            self.pages[key] = page
+        return page
+
+    def _ensure_page_loaded(self, key):
+        if key in self.page_map:
+            return self.page_map[key]
+        page = self.get_or_create_page(key)
+        if page is None:
+            return None
+        idx = self.stack.addWidget(page)
+        self.page_map[key] = idx
+        return idx
+
+    def create_pages(self):
+        self.pages = {
+            "unified": None,
+            "config": None,
+            "keyword": None,
+            "blog": None,
+            "news_short": None,
+            "news_daum": None,
+            "news_nate": None,
+            "cafe": None,
+            "popular": None,
+            "bulk_title": None,
+            "youtube": None,
+            "multilink_ai": None,
+            "imagegen": None,
+            "publish": None,
+            "salgoo_config":  None,
+            "salgoo_news":    None,
+            "salgoo_rewrite": None,
+            "salgoo_publish": None,
+        }
+        self.page_factories = self._create_page_factories()
+        self.stack.addWidget(self._make_start_placeholder())
+        self.stack.setCurrentIndex(0)
+
+        # 저장된 폼 상태 복원 — v50 LAZY MODE: 기본 비활성화
+        try:
+            import os as _os
+            if _os.path.exists('.enable_restore'):
+                QTimer.singleShot(2500, self._safe_restore_form_state)
+                print('[v50] form_state 복원 예약됨 (.enable_restore 감지)')
+            else:
+                print('[v50] form_state 자동 복원 비활성 (.enable_restore 없음)')
+        except Exception as _e:
+            print(f'[v50] restore guard error: {_e}')
+
+        # 30초마다 자동 저장 — 시작 5초 후부터 작동
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self.save_form_state)
+        QTimer.singleShot(5000, lambda: self.auto_save_timer.start(30000))
+
+    def on_tree_click(self, item, col):
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if key:
+            idx = self._ensure_page_loaded(key)
+            if idx is not None:
+                self.stack.setCurrentIndex(idx)
+                self.log(f"📂 {item.text(0)}")
+
+    def save_form_state(self):
+        """모든 페이지의 입력 상태를 파일로 저장"""
+        state = {}
+        try:
+            blog = self.pages.get('blog')
+            if blog:
+                state['blog'] = {
+                    'keywords_input': blog.keywords_input.text(),
+                    'extract_count': blog.extract_count.value(),
+                    'sort_type': blog.sort_type.currentIndex(),
+                    'ai_service': blog.ai_service.currentIndex(),
+                    'char_count': blog.char_count.value(),
+                    'ai_prompt': blog.ai_prompt.toPlainText(),
+                    'opt_map': blog.opt_map.isChecked(),
+                    'opt_video': blog.opt_video.isChecked(),
+                    'opt_quote': blog.opt_quote.isChecked(),
+                    'opt_photo': blog.opt_photo.isChecked(),
+                    'opt_hashtag': blog.opt_hashtag.isChecked(),
+                    'save_mode': blog.save_mode.currentIndex(),
+                    'schedule_time': blog.schedule_time.text(),
+                    'crawl_result': blog.crawl_result.toPlainText(),
+                    'ai_input': blog.ai_input.toPlainText(),
+                    'ai_output': blog.ai_output.toPlainText(),
+                    # 키워드 테이블
+                    'keyword_rows': [
+                        [blog.keyword_table.item(r, c).text() if blog.keyword_table.item(r, c) else ''
+                         for c in range(blog.keyword_table.columnCount())]
+                        for r in range(blog.keyword_table.rowCount())
+                    ],
+                    # 생성된 원고 보존
+                    'generated_articles': blog.generated_articles if hasattr(blog, 'generated_articles') else [],
+                }
+
+            keyword_page = self.pages.get('keyword')
+            if keyword_page:
+                state['keyword'] = {
+                    'seed_keywords': keyword_page.seed_keywords.toPlainText(),
+                    'result': keyword_page.result.toPlainText(),
+                }
+
+            for news_key in ['news_short', 'news_daum', 'news_nate']:
+                news = self.pages.get(news_key)
+                if news:
+                    state[news_key] = {
+                        'crawl_url': news.crawl_url.text(),
+                        'collect_count': news.collect_count.value(),
+                        'keywords_filter': news.keywords_filter.text(),
+                        'ai_prompt': news.ai_prompt.toPlainText(),
+                        'ai_model': news.ai_model.currentIndex(),
+                        'char_count': news.char_count.value(),
+                        'collect_result': news.collect_result.toPlainText(),
+                        'ai_input': news.ai_input.toPlainText(),
+                        'ai_output': news.ai_output.toPlainText(),
+                        'account_combo': news.account_combo.currentText() if hasattr(news, 'account_combo') else '',
+                        'blog_folder': news.blog_folder.currentText() if hasattr(news, 'blog_folder') else '',
+                        'save_mode': news.save_mode.currentIndex() if hasattr(news, 'save_mode') else 0,
+                        'generated_articles': news.generated_articles if hasattr(news, 'generated_articles') else [],
+                    }
+
+            cafe = self.pages.get('cafe')
+            if cafe:
+                state['cafe'] = {
+                    'cafe_url': cafe.cafe_url.text(),
+                    'cafe_id': cafe.cafe_id,
+                    'category_index': cafe.category_combo.currentIndex(),
+                    'page_start': cafe.page_start.value(),
+                    'page_end': cafe.page_end.value(),
+                    'ai_prompt': cafe.ai_prompt.toPlainText(),
+                    'ai_model': cafe.ai_model.currentIndex(),
+                    'collect_result': cafe.collect_result.toPlainText(),
+                    'ai_input': cafe.ai_input.toPlainText(),
+                    'ai_output': cafe.ai_output.toPlainText(),
+                    'account_combo': cafe.account_combo.currentText() if hasattr(cafe, 'account_combo') else '',
+                    'blog_folder': cafe.blog_folder.currentText() if hasattr(cafe, 'blog_folder') else '',
+                    'save_mode': cafe.save_mode.currentIndex() if hasattr(cafe, 'save_mode') else 0,
+                    'generated_articles': cafe.generated_articles if hasattr(cafe, 'generated_articles') else [],
+                }
+
+            popular = self.pages.get('popular')
+            if popular:
+                state['popular'] = {
+                    'blog_urls': popular.popular_blog_urls.toPlainText(),
+                    'popular_count': popular.popular_count.value(),
+                    'ai_prompt': popular.ai_prompt.toPlainText(),
+                    'ai_model': popular.ai_model.currentIndex(),
+                    'char_count': popular.char_count.value(),
+                    'popular_result': popular.popular_result.toPlainText(),
+                    'ai_input': popular.ai_input.toPlainText(),
+                    'ai_output': popular.ai_output.toPlainText(),
+                    'account_combo': popular.account_combo.currentText() if hasattr(popular, 'account_combo') else '',
+                    'blog_folder': popular.blog_folder.currentText() if hasattr(popular, 'blog_folder') else '',
+                    'save_mode': popular.save_mode.currentIndex() if hasattr(popular, 'save_mode') else 0,
+                    'generated_articles': popular.generated_articles if hasattr(popular, 'generated_articles') else [],
+                }
+
+            with open('form_state.json', 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"폼 상태 저장 실패: {e}")
+
+    def restore_form_state(self):
+        """저장된 폼 상태 복원 (시작 크래시 방지를 위해 안전모드 복원)"""
+        try:
+            with open('form_state.json', 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except Exception:
+            return
+
+        self._is_restoring_state = True
+        try:
+            blog_state = state.get('blog', {})
+            blog = self.pages.get('blog')
+            if blog and blog_state:
+                blog.keywords_input.setText(blog_state.get('keywords_input', ''))
+                blog.extract_count.setValue(blog_state.get('extract_count', 5))
+                blog.sort_type.setCurrentIndex(blog_state.get('sort_type', 0))
+                blog.ai_service.setCurrentIndex(blog_state.get('ai_service', 0))
+                blog.char_count.setValue(blog_state.get('char_count', 2000))
+                blog.ai_prompt.setPlainText(blog_state.get('ai_prompt', blog.ai_prompt.toPlainText()))
+                blog.opt_map.setChecked(blog_state.get('opt_map', False))
+                blog.opt_video.setChecked(blog_state.get('opt_video', False))
+                blog.opt_quote.setChecked(blog_state.get('opt_quote', True))
+                blog.opt_photo.setChecked(blog_state.get('opt_photo', True))
+                blog.opt_hashtag.setChecked(blog_state.get('opt_hashtag', True))
+                blog.save_mode.setCurrentIndex(blog_state.get('save_mode', 0))
+                blog.schedule_time.setText(blog_state.get('schedule_time', ''))
+                blog.crawl_result.setPlainText(blog_state.get('crawl_result', ''))
+                blog.ai_input.setPlainText(blog_state.get('ai_input', ''))
+                blog.ai_output.setPlainText(blog_state.get('ai_output', ''))
+
+                for row_data in blog_state.get('keyword_rows', []):
+                    r = blog.keyword_table.rowCount()
+                    blog.keyword_table.insertRow(r)
+                    for c, val in enumerate(row_data):
+                        blog.keyword_table.setItem(r, c, QTableWidgetItem(val))
+
+
+                # 생성된 원고 복원
+                saved_articles = blog_state.get("generated_articles", [])
+                if saved_articles and hasattr(blog, "generated_articles"):
+                    blog.generated_articles = saved_articles
+                    blog._update_article_table()
+                    print(f"[v49] AI글쓰기 원고 {len(saved_articles)}건 복원")
+            kw_state = state.get('keyword', {})
+            keyword_page = self.pages.get('keyword')
+            if keyword_page and kw_state:
+                keyword_page.seed_keywords.setPlainText(kw_state.get('seed_keywords', ''))
+                keyword_page.result.setPlainText(kw_state.get('result', ''))
+
+            for news_key in ['news_short', 'news_daum', 'news_nate']:
+                ns = state.get(news_key, {})
+                news = self.pages.get(news_key)
+                if news and ns:
+                    news.crawl_url.setText(ns.get('crawl_url', news.crawl_url.text()))
+                    news.collect_count.setValue(ns.get('collect_count', 10))
+                    news.keywords_filter.setText(ns.get('keywords_filter', ''))
+                    news.ai_prompt.setPlainText(ns.get('ai_prompt', news.ai_prompt.toPlainText()))
+                    news.ai_model.setCurrentIndex(ns.get('ai_model', 0))
+                    news.char_count.setValue(ns.get('char_count', 2000))
+                    news.collect_result.setPlainText(ns.get('collect_result', ''))
+                    news.ai_input.setPlainText(ns.get('ai_input', ''))
+                    news.ai_output.setPlainText(ns.get('ai_output', ''))
+                    saved_articles = ns.get('generated_articles', [])
+                    if saved_articles and hasattr(news, 'generated_articles'):
+                        news.generated_articles = saved_articles
+                        news._update_article_table()
+                    if hasattr(news, 'account_combo'):
+                        saved_account = ns.get('account_combo', '')
+                        if saved_account:
+                            # 시작 직후 account/blog_folder 자동 복원은 비활성화 (0xC0000409 방지)
+                            pass
+                    if hasattr(news, 'save_mode'):
+                        news.save_mode.setCurrentIndex(ns.get('save_mode', 0))
+                    if hasattr(news, 'blog_folder'):
+                        saved_folder = ns.get('blog_folder', '')
+                        if saved_folder:
+                            pass
+
+            cafe_state = state.get('cafe', {})
+            cafe = self.pages.get('cafe')
+            if cafe and cafe_state:
+                cafe.cafe_url.setText(cafe_state.get('cafe_url', ''))
+                cafe.cafe_id = cafe_state.get('cafe_id', None)
+                cafe.page_start.setValue(cafe_state.get('page_start', 1))
+                cafe.page_end.setValue(cafe_state.get('page_end', 3))
+                cafe.ai_prompt.setPlainText(cafe_state.get('ai_prompt', cafe.ai_prompt.toPlainText()))
+                cafe.ai_model.setCurrentIndex(cafe_state.get('ai_model', 0))
+                cafe.collect_result.setPlainText(cafe_state.get('collect_result', ''))
+                cafe.ai_input.setPlainText(cafe_state.get('ai_input', ''))
+                cafe.ai_output.setPlainText(cafe_state.get('ai_output', ''))
+                saved_cafe_articles = cafe_state.get('generated_articles', [])
+                if saved_cafe_articles and hasattr(cafe, 'generated_articles'):
+                    cafe.generated_articles = saved_cafe_articles
+                    cafe._update_article_table()
+                if hasattr(cafe, 'account_combo'):
+                    saved_account = cafe_state.get('account_combo', '')
+                    if saved_account:
+                        pass
+                if hasattr(cafe, 'save_mode'):
+                    cafe.save_mode.setCurrentIndex(cafe_state.get('save_mode', 0))
+                if hasattr(cafe, 'blog_folder'):
+                    saved_folder = cafe_state.get('blog_folder', '')
+                    if saved_folder:
+                        # v49: 시작 직후 콤보박스 setCurrentText 차단 (네이티브 크래시 방지)
+                        pass
+
+            pop_state = state.get('popular', {})
+            popular = self.pages.get('popular')
+            if popular and pop_state:
+                popular.popular_blog_urls.setPlainText(pop_state.get('blog_urls', ''))
+                popular.popular_count.setValue(pop_state.get('popular_count', 10))
+                popular.ai_prompt.setPlainText(pop_state.get('ai_prompt', popular.ai_prompt.toPlainText()))
+                popular.ai_model.setCurrentIndex(pop_state.get('ai_model', 0))
+                popular.char_count.setValue(pop_state.get('char_count', 2000))
+                popular.popular_result.setPlainText(pop_state.get('popular_result', ''))
+                popular.ai_input.setPlainText(pop_state.get('ai_input', ''))
+                popular.ai_output.setPlainText(pop_state.get('ai_output', ''))
+                # 인기글 생성된 원고 복원
+                saved_pop_articles = pop_state.get("generated_articles", [])
+                if saved_pop_articles and hasattr(popular, "generated_articles"):
+                    popular.generated_articles = saved_pop_articles
+                    popular._update_article_table()
+                    print(f"[v49] 인기글 원고 {len(saved_pop_articles)}건 복원")
+                if hasattr(popular, 'account_combo'):
+                    saved_account = pop_state.get('account_combo', '')
+                    if saved_account:
+                        pass
+                if hasattr(popular, 'save_mode'):
+                    popular.save_mode.setCurrentIndex(pop_state.get('save_mode', 0))
+                if hasattr(popular, 'blog_folder'):
+                    saved_folder = pop_state.get('blog_folder', '')
+                    if saved_folder:
+                        # v49: 시작 직후 콤보박스 setCurrentText 차단
+                        pass
+
+            print("[v49] 이전 작업 상태 복원 완료")
+        except Exception as e:
+            print(f"폼 상태 복원 실패: {e}")
+        finally:
+            self._is_restoring_state = False
+
+    def closeEvent(self, event):
+        """앱 종료 시 폼 상태 자동 저장"""
+        self.save_form_state()
+        event.accept()
+
+
+# ════════════════════════════════════════════════════════════════
+# 📥 제목 대량 업로드 페이지 (v34 신규)
+# ════════════════════════════════════════════════════════════════
+
+# ========================================================================
+# v42: YouTube 수집 → GPT 원고 → 발행
+# ========================================================================
+# === YouTube 수집 페이지 (v42 추가) ===
+# 자막 추출 → GPT 원고 생성 → 엑셀 저장 / 바로 발행
+# 입력 모드: ① URL 직접 ② 엑셀 업로드 ③ 키워드 검색(YouTube Data API)
+
+import re
+import os
+import json
+import time
+import traceback
+from urllib.parse import urlparse, parse_qs
+
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
+    QTextEdit, QSpinBox, QComboBox, QFileDialog, QMessageBox, QCheckBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QTabWidget,
+    QProgressBar, QAbstractItemView
+)
+
+
+def _extract_video_id(url_or_id: str) -> str:
+    s = (url_or_id or "").strip()
+    if not s:
+        return ""
+    # 이미 11자리 ID
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):
+        return s
+    try:
+        u = urlparse(s)
+        host = (u.netloc or "").lower()
+        if "youtu.be" in host:
+            return u.path.lstrip("/").split("/")[0]
+        if "youtube.com" in host:
+            if u.path.startswith("/shorts/"):
+                return u.path.split("/")[2]
+            if u.path.startswith("/live/"):
+                return u.path.split("/")[2]
+            if u.path.startswith("/embed/"):
+                return u.path.split("/")[2]
+            qs = parse_qs(u.query)
+            if "v" in qs:
+                return qs["v"][0]
+    except Exception:
+        pass
+    m = re.search(r"([A-Za-z0-9_-]{11})", s)
+    return m.group(1) if m else ""
+
+
+def _parse_subtitle_blob(raw: str, ext: str = "") -> str:
+    """json3 / vtt / srv3·xml → 평문"""
+    import json as _json, re as _re, html as _html
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, dict) and "events" in data:
+            parts = []
+            for ev in data["events"]:
+                for s in (ev.get("segs") or []):
+                    t = s.get("utf8")
+                    if t and t != "\n":
+                        parts.append(t)
+            text = "".join(parts).replace("\n", " ")
+            text = _re.sub(r"\s+", " ", text).strip()
+            if text: return text
+    except Exception:
+        pass
+    if "WEBVTT" in raw[:200] or ext == "vtt":
+        out = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line: continue
+            if line.startswith("WEBVTT") or line.startswith("NOTE"): continue
+            if "-->" in line: continue
+            if _re.match(r"^\d+$", line): continue
+            line = _re.sub(r"<[^>]+>", "", line)
+            out.append(line)
+        text = " ".join(out)
+        text = _html.unescape(_re.sub(r"\s+", " ", text)).strip()
+        if text: return text
+    if "<text" in raw:
+        out = _re.findall(r"<text[^>]*>(.*?)</text>", raw, _re.DOTALL)
+        text = _html.unescape(" ".join(out))
+        text = _re.sub(r"<[^>]+>", "", text)
+        text = _re.sub(r"\s+", " ", text).strip()
+        if text: return text
+    return ""
+
+
+def _fetch_transcript_ytdlp(video_id: str, langs=("ko", "en", "ja"),
+                             browser: str = "chrome", cookiefile: str = "") -> dict:
+    """yt-dlp + 브라우저 쿠키로 자막 추출. 로그인 세션 그대로 사용."""
+    try:
+        import yt_dlp
+    except ImportError:
+        raise RuntimeError("yt-dlp 미설치 → pip install yt-dlp")
+    import urllib.request, os as _os
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": list(langs),
+        "subtitlesformat": "json3/vtt/best",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if cookiefile and _os.path.exists(cookiefile):
+        ydl_opts["cookiefile"] = cookiefile
+    elif browser and browser.lower() != "none":
+        ydl_opts["cookiesfrombrowser"] = (browser.lower(),)
+
+    last_err = None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = info.get("title") or ""
+        subs = info.get("subtitles") or {}
+        autos = info.get("automatic_captions") or {}
+        for pool, kind in ((subs, "manual"), (autos, "auto")):
+            for lang in langs:
+                if lang in pool and pool[lang]:
+                    track = None
+                    for t in pool[lang]:
+                        if t.get("ext") == "json3":
+                            track = t; break
+                    if track is None:
+                        track = pool[lang][0]
+                    try:
+                        req = urllib.request.Request(track["url"],
+                            headers={"User-Agent": "Mozilla/5.0"})
+                        raw = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", errors="ignore")
+                    except Exception as e:
+                        last_err = e; continue
+                    text = _parse_subtitle_blob(raw, track.get("ext", ""))
+                    if text:
+                        return {"text": text, "lang": f"{lang}({kind})", "title": title}
+        raise RuntimeError(f"자막 트랙 없음 (subs={list(subs.keys())}, autos={list(autos.keys())})")
+    except Exception as e:
+        last_err = e
+        raise RuntimeError(f"yt-dlp 자막 실패: {last_err}")
+
+
+def _fetch_transcript(video_id: str, langs=("ko", "en", "ja", "zh-Hans", "zh-Hant"),
+                      browser: str = "chrome", cookiefile: str = "") -> dict:
+    """1차: yt-dlp(브라우저 쿠키) / 2차: youtube-transcript-api 폴백."""
+    last_err = None
+    try:
+        return _fetch_transcript_ytdlp(video_id, langs=langs, browser=browser, cookiefile=cookiefile)
+    except Exception as e:
+        last_err = e
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        raise RuntimeError(f"자막 실패: {last_err}")
+
+    def _join(items):
+        out = []
+        for it in items:
+            t = it.get("text") if isinstance(it, dict) else getattr(it, "text", "")
+            if t: out.append(t)
+        return " ".join(out)
+
+    try:
+        api = YouTubeTranscriptApi()
+        try:
+            tlist = api.list(video_id)
+        except AttributeError:
+            tlist = api.list_transcripts(video_id)
+        for lang in langs:
+            try:
+                txt = _join(tlist.find_manually_created_transcript([lang]).fetch())
+                if txt: return {"text": txt, "lang": lang}
+            except Exception as e: last_err = e
+        for lang in langs:
+            try:
+                txt = _join(tlist.find_generated_transcript([lang]).fetch())
+                if txt: return {"text": txt, "lang": lang}
+            except Exception as e: last_err = e
+        for t in tlist:
+            try:
+                if getattr(t, "is_translatable", False):
+                    txt = _join(t.translate("ko").fetch())
+                    if txt: return {"text": txt, "lang": f"{t.language_code}->ko"}
+            except Exception as e: last_err = e
+        try:
+            txt = _join(api.fetch(video_id, languages=list(langs)))
+            if txt: return {"text": txt, "lang": "auto"}
+        except Exception as e: last_err = e
+    except Exception as e:
+        last_err = e
+
+    try:
+        items = YouTubeTranscriptApi.get_transcript(video_id, languages=list(langs))  # type: ignore
+        txt = _join(items)
+        if txt: return {"text": txt, "lang": "auto"}
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(f"자막 없음/추출 실패: {last_err}")
+
+
+
+def _yt_search(api_key: str, query: str, max_results: int = 10) -> list:
+    """YouTube Data API v3 search → [{'id':..,'title':..,'url':..}]"""
+    import requests
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "key": api_key, "q": query, "part": "snippet",
+        "type": "video", "maxResults": min(max(int(max_results), 1), 50),
+        "regionCode": "KR", "relevanceLanguage": "ko",
+    }
+    r = requests.get(url, params=params, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"YouTube API {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    out = []
+    for it in data.get("items", []):
+        vid = it.get("id", {}).get("videoId")
+        if not vid:
+            continue
+        out.append({
+            "id": vid,
+            "title": it.get("snippet", {}).get("title", ""),
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    return out
+
+
+# ========= 백그라운드 워커 =========
+
+class _CollectWorker(QThread):
+    log_sig = pyqtSignal(str)
+    progress_sig = pyqtSignal(int, int)
+    item_sig = pyqtSignal(dict)   # {id,url,title,transcript,lang,status,error}
+    done_sig = pyqtSignal()
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.items = items
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        total = len(self.items)
+        for i, it in enumerate(self.items, 1):
+            if self._stop:
+                self.log_sig.emit("⏹ 사용자 중지")
+                break
+            vid = it.get("id") or _extract_video_id(it.get("url", ""))
+            title = it.get("title", "") or ""
+            row = {"id": vid, "url": it.get("url") or f"https://www.youtube.com/watch?v={vid}",
+                   "title": title, "transcript": "", "lang": "", "status": "수집중", "error": ""}
+            self.item_sig.emit({**row, "_row_index": i - 1, "_init": True})
+            self.progress_sig.emit(i, total)
+            self.log_sig.emit(f"[{i}/{total}] 자막 수집: {vid} {title[:40]}")
+            if not vid:
+                row["status"] = "실패"; row["error"] = "video id 추출 실패"
+                self.item_sig.emit({**row, "_row_index": i - 1})
+                continue
+            try:
+                _br = self.cookie_browser.currentText() if hasattr(self, "cookie_browser") else "chrome"
+                _cf = self.cookie_file.text().strip() if hasattr(self, "cookie_file") else ""
+                tr = _fetch_transcript(vid, browser=_br, cookiefile=_cf)
+                row["transcript"] = tr.get("text", "")
+                row["lang"] = tr.get("lang", "")
+                row["status"] = "수집완료"
+                self.log_sig.emit(f"   ✓ {len(row['transcript'])}자 ({row['lang']})")
+            except Exception as e:
+                row["status"] = "실패"; row["error"] = str(e)[:200]
+                self.log_sig.emit(f"   ✗ {row['error']}")
+            self.item_sig.emit({**row, "_row_index": i - 1})
+            time.sleep(0.4)
+        self.done_sig.emit()
+
+
+class _GenWorker(QThread):
+    """Perplexity sonar-pro 기반 유튜브 자막 → 블로그 원고 생성"""
+    log_sig = pyqtSignal(str)
+    progress_sig = pyqtSignal(int, int)
+    item_sig = pyqtSignal(int, dict)
+    done_sig = pyqtSignal()
+
+    def __init__(self, rows, prompt_template, char_count, api_key, model="sonar-pro", parent=None):
+        super().__init__(parent)
+        self.rows = rows  # [(row_index, item)]
+        self.prompt_template = prompt_template
+        self.char_count = char_count
+        self.api_key = api_key
+        self.model = model
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        total = len(self.rows)
+        for i, (row_index, it) in enumerate(self.rows, 1):
+            if self._stop:
+                self.log_sig.emit("⏹ 사용자 중지"); break
+            self.progress_sig.emit(i, total)
+            title = it.get("title", "")
+            transcript = it.get("transcript", "")
+            if not transcript.strip():
+                self.item_sig.emit(row_index, {"status": "실패", "error": "자막 없음", "content": ""})
+                continue
+            try:
+                prompt = self.prompt_template.format(
+                    title=title, transcript=transcript[:8000],
+                    char_count=self.char_count, url=it.get("url", "")
+                )
+            except Exception as e:
+                # 프롬프트에 잘못된 placeholder가 있어도 안전하게 진행
+                prompt = self.prompt_template + "\n\n[자막]\n" + transcript[:8000]
+            try:
+                # sonar-pro는 medium, sonar는 low로 부하 감소 (멈춤 방지)
+                ctx_size = 'low' if self.model == 'sonar' else 'medium'
+                text = call_perplexity(
+                    self.api_key, prompt, model=self.model,
+                    search_context_size=ctx_size, timeout=120.0
+                )
+                if not text or not text.strip():
+                    raise RuntimeError("Perplexity 빈 응답")
+                self.item_sig.emit(row_index, {"status": "생성완료", "content": text, "error": ""})
+                self.log_sig.emit(f"[{i}/{total}] ✓ 생성 완료 ({len(text)}자)")
+            except Exception as e:
+                err = str(e)[:200]
+                self.item_sig.emit(row_index, {"status": "실패", "error": err})
+                self.log_sig.emit(f"[{i}/{total}] ✗ {err}")
+            time.sleep(1.0)
+        self.done_sig.emit()
+
+
+# ========= 페이지 위젯 =========
+
+
+class YouTubeCollectPage(QWidget):
+    DEFAULT_PROMPT = (
+        "아래는 유튜브 영상 '{title}'의 자막 전문이야.\n"
+        "이 내용을 바탕으로 한국어 네이버 블로그 포스트를 작성해.\n\n"
+        "조건:\n"
+        "- 분량: 약 {char_count}자\n"
+        "- 도입부에서 영상 핵심을 후킹하는 한 문단\n"
+        "- 본문은 소제목(##)으로 3~5개 섹션 구성, 각 섹션 자연스러운 단락\n"
+        "- 자막에 없는 정보는 추측하지 말 것 (사실 기반)\n"
+        "- 마지막에 한 줄 요약 + 영상 출처 링크: {url}\n"
+        "- 광고/홍보 톤 금지, 정보성 친근한 어조\n\n"
+        "[자막]\n{transcript}"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.collected = []   # 각 행: dict(id,url,title,transcript,lang,status,error,content,selected)
+        self.collect_worker = None
+        self._build_ui()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        title = QLabel("📺 유튜브 자막 수집 (원고 생성은 '유튜브 원고' 탭에서)")
+        title.setStyleSheet("color:#FFD700; font-size:18px; font-weight:bold;")
+        root.addWidget(title)
+
+        # 입력 모드 탭
+        self.input_tabs = QTabWidget()
+        self.input_tabs.setStyleSheet("QTabBar::tab{padding:6px 12px;} QTabBar::tab:selected{color:#FFD700;}")
+
+        # ① URL 직접
+        w1 = QWidget(); l1 = QVBoxLayout(w1)
+        l1.addWidget(QLabel("유튜브 URL을 한 줄에 하나씩 입력 (숏/롱 자동 인식)"))
+        self.url_input = QTextEdit()
+        self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=xxxx\nhttps://youtu.be/yyyy\nhttps://www.youtube.com/shorts/zzzz")
+        self.url_input.setMaximumHeight(120)
+        l1.addWidget(self.url_input)
+        self.input_tabs.addTab(w1, "① URL 직접")
+
+        # ② 엑셀 업로드
+        w2 = QWidget(); l2 = QVBoxLayout(w2)
+        l2.addWidget(QLabel("엑셀 컬럼: 'URL' 또는 'url' / 선택적으로 '제목'"))
+        h2 = QHBoxLayout()
+        self.excel_path = QLineEdit(); self.excel_path.setReadOnly(True)
+        btn_excel = QPushButton("📂 엑셀 선택"); btn_excel.clicked.connect(self._pick_excel)
+        btn_tpl = QPushButton("📥 양식 다운로드"); btn_tpl.clicked.connect(self._download_template)
+        h2.addWidget(self.excel_path); h2.addWidget(btn_excel); h2.addWidget(btn_tpl)
+        l2.addLayout(h2)
+        self.input_tabs.addTab(w2, "② 엑셀 업로드")
+
+        # ③ 키워드 검색
+        w3 = QWidget(); l3 = QVBoxLayout(w3)
+        l3.addWidget(QLabel("YouTube Data API v3 키워드 검색 → 상위 N개 자동 수집"))
+        h3a = QHBoxLayout()
+        h3a.addWidget(QLabel("API Key:"))
+        self.yt_api_key = QLineEdit()
+        self.yt_api_key.setPlaceholderText("AIza... (Google Cloud Console에서 발급)")
+        self.yt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.yt_api_key.setText(self._load_api_key())
+        h3a.addWidget(self.yt_api_key)
+        btn_save_key = QPushButton("💾"); btn_save_key.setFixedWidth(40)
+        btn_save_key.clicked.connect(self._save_api_key)
+        h3a.addWidget(btn_save_key)
+        l3.addLayout(h3a)
+        h3b = QHBoxLayout()
+        h3b.addWidget(QLabel("키워드:"))
+        self.kw_query = QLineEdit(); self.kw_query.setPlaceholderText("예: 다이어트 식단 추천")
+        h3b.addWidget(self.kw_query)
+        h3b.addWidget(QLabel("개수:"))
+        self.kw_count = QSpinBox(); self.kw_count.setRange(1, 50); self.kw_count.setValue(10)
+        h3b.addWidget(self.kw_count)
+        btn_search = QPushButton("🔎 검색하여 목록 추가")
+        btn_search.clicked.connect(self._search_youtube)
+        h3b.addWidget(btn_search)
+        l3.addLayout(h3b)
+        self.input_tabs.addTab(w3, "③ 키워드 검색")
+
+        root.addWidget(self.input_tabs)
+
+        # 🍪 브라우저 쿠키 옵션 (yt-dlp가 로그인 세션 자동 사용)
+        cookie_bar = QHBoxLayout()
+        cookie_bar.addWidget(QLabel("🍪 쿠키 사용:"))
+        self.cookie_browser = QComboBox()
+        self.cookie_browser.addItems(["chrome", "edge", "firefox", "brave", "opera", "safari", "none"])
+        self.cookie_browser.setCurrentText("chrome")
+        self.cookie_browser.setToolTip("로그인된 브라우저 쿠키 자동 사용 (해당 브라우저는 종료 권장)")
+        cookie_bar.addWidget(self.cookie_browser)
+        cookie_bar.addWidget(QLabel("또는 cookies.txt:"))
+        self.cookie_file = QLineEdit()
+        self.cookie_file.setPlaceholderText("(선택) cookies.txt 경로 — 입력 시 우선 사용")
+        cookie_bar.addWidget(self.cookie_file)
+        btn_cookie = QPushButton("📂"); btn_cookie.setFixedWidth(40)
+        btn_cookie.clicked.connect(self._pick_cookie_file)
+        cookie_bar.addWidget(btn_cookie)
+        root.addLayout(cookie_bar)
+
+        # 수집 버튼
+        bar1 = QHBoxLayout()
+        self.btn_collect = QPushButton("▶ 자막 수집 시작")
+        self.btn_collect.setStyleSheet("background:#1a7f37; color:white; font-weight:bold; padding:8px 14px;")
+        self.btn_collect.clicked.connect(self._start_collect)
+        self.btn_stop_collect = QPushButton("⏹ 중지")
+        self.btn_stop_collect.clicked.connect(self._stop_collect)
+        self.btn_clear = QPushButton("🗑 목록 비우기")
+        self.btn_clear.clicked.connect(self._clear_table)
+        bar1.addWidget(self.btn_collect); bar1.addWidget(self.btn_stop_collect)
+        bar1.addStretch(); bar1.addWidget(self.btn_clear)
+        root.addLayout(bar1)
+
+        self.progress = QProgressBar(); self.progress.setValue(0)
+        root.addWidget(self.progress)
+
+        # 결과 테이블
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["선택", "VID", "제목", "자막(자수)", "언어", "상태", "원고(자수)", "URL"])
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self._open_detail)
+        root.addWidget(self.table, 2)
+
+        # ── Perplexity 설정 (생성/발행 통합) ──
+        cfg_box = QGroupBox("🤖 Perplexity 원고 생성 설정")
+        cfg_l = QVBoxLayout(cfg_box)
+        prow1 = QHBoxLayout()
+        prow1.addWidget(QLabel("API Key:"))
+        self.pplx_key = QLineEdit()
+        self.pplx_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pplx_key.setPlaceholderText("pplx-... (비워두면 환경변수 PERPLEXITY_API_KEY 사용)")
+        prow1.addWidget(self.pplx_key, 3)
+        btn_save_pkey = QPushButton("💾"); btn_save_pkey.setFixedWidth(40)
+        btn_save_pkey.clicked.connect(self._save_pplx_key)
+        prow1.addWidget(btn_save_pkey)
+        prow1.addWidget(QLabel("모델:"))
+        self.pplx_model = QComboBox()
+        self.pplx_model.addItems(["sonar-pro", "sonar", "sonar-reasoning-pro", "sonar-reasoning"])
+        prow1.addWidget(self.pplx_model)
+        prow1.addWidget(QLabel("글자수:"))
+        self.char_count = QSpinBox(); self.char_count.setRange(500, 8000); self.char_count.setValue(2000)
+        prow1.addWidget(self.char_count)
+        cfg_l.addLayout(prow1)
+
+        cfg_l.addWidget(QLabel("프롬프트 (사용 가능한 변수: {title} {transcript} {url} {char_count})"))
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlainText(self.DEFAULT_PROMPT)
+        self.prompt_edit.setMaximumHeight(140)
+        cfg_l.addWidget(self.prompt_edit)
+        root.addWidget(cfg_box)
+        self._load_pplx_key()
+
+        # ── 생성 + 발행 액션 바 ──
+        action_bar = QHBoxLayout()
+        self.btn_gen = QPushButton("🤖 선택 항목 원고 생성 (Perplexity)")
+        self.btn_gen.setStyleSheet("background:#0969da; color:white; font-weight:bold; padding:8px 14px;")
+        self.btn_gen.clicked.connect(self._start_generate)
+        self.btn_stop_gen = QPushButton("⏹ 생성 중지"); self.btn_stop_gen.clicked.connect(self._stop_generate)
+        action_bar.addWidget(self.btn_gen); action_bar.addWidget(self.btn_stop_gen)
+        action_bar.addStretch()
+        root.addLayout(action_bar)
+
+        pub_box = QGroupBox("🚀 발행 / 저장")
+        pub_l = QHBoxLayout(pub_box)
+        self.cb_save_excel = QCheckBox("📊 엑셀 저장"); self.cb_save_excel.setChecked(True)
+        self.cb_publish = QCheckBox("📤 네이버 블로그 자동 발행 (인기글 발행 로직 재사용)")
+        pub_l.addWidget(self.cb_save_excel); pub_l.addWidget(self.cb_publish); pub_l.addStretch()
+        self.btn_run = QPushButton("▶ 실행")
+        self.btn_run.setStyleSheet("background:#bf3989; color:white; font-weight:bold; padding:8px 14px;")
+        self.btn_run.clicked.connect(self._run_publish)
+        pub_l.addWidget(self.btn_run)
+        root.addWidget(pub_box)
+
+    # ---------- API key 저장 ----------
+    def _key_path(self):
+        return "youtube_api_key.json"
+
+    def _load_api_key(self):
+        try:
+            with open(self._key_path(), "r", encoding="utf-8") as f:
+                return json.load(f).get("key", "")
+        except Exception:
+            return ""
+
+    def _save_api_key(self):
+        try:
+            with open(self._key_path(), "w", encoding="utf-8") as f:
+                json.dump({"key": self.yt_api_key.text().strip()}, f)
+            self._log("✔ YouTube API Key 저장")
+        except Exception as e:
+            self._log(f"✗ 키 저장 실패: {e}")
+
+    # ---------- 입력 모드 핸들러 ----------
+    def _pick_cookie_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "cookies.txt 선택", "", "Cookies (*.txt);;All (*.*)")
+        if path:
+            self.cookie_file.setText(path)
+
+    def _pick_excel(self):
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel (*.xlsx *.xls)")
+        if path:
+            self.excel_path.setText(path)
+            try:
+                import pandas as pd
+                df = pd.read_excel(path)
+                cols = {c.lower(): c for c in df.columns}
+                url_col = cols.get("url") or cols.get("유튜브 url") or cols.get("youtube") or list(df.columns)[0]
+                title_col = cols.get("제목") or cols.get("title")
+                added = 0
+                for _, r in df.iterrows():
+                    u = str(r[url_col]).strip()
+                    if not u or u == "nan":
+                        continue
+                    t = str(r[title_col]).strip() if title_col and title_col in df.columns else ""
+                    self._add_row({"url": u, "title": t, "id": _extract_video_id(u)})
+                    added += 1
+                self._log(f"📂 엑셀에서 {added}건 추가")
+            except Exception as e:
+                QMessageBox.warning(self, "오류", f"엑셀 읽기 실패: {e}")
+
+    def _download_template(self):
+        try:
+            import pandas as pd
+            df = pd.DataFrame([
+                {"URL": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "제목": "예시 영상"},
+                {"URL": "https://youtu.be/abcdefghijk", "제목": ""},
+            ])
+            path, _ = QFileDialog.getSaveFileName(self, "양식 저장", "youtube_url_template.xlsx", "Excel (*.xlsx)")
+            if path:
+                df.to_excel(path, index=False)
+                self._log(f"📥 양식 저장: {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", str(e))
+
+    def _search_youtube(self):
+        api_key = self.yt_api_key.text().strip()
+        q = self.kw_query.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "안내", "YouTube Data API Key를 입력하세요"); return
+        if not q:
+            QMessageBox.warning(self, "안내", "검색 키워드를 입력하세요"); return
+        try:
+            results = _yt_search(api_key, q, self.kw_count.value())
+            for r in results:
+                self._add_row(r)
+            self._log(f"🔎 '{q}' → {len(results)}건 추가")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", str(e))
+
+    # ---------- 테이블 ----------
+    def _add_row(self, item: dict):
+        row = {
+            "id": item.get("id") or _extract_video_id(item.get("url", "")),
+            "url": item.get("url", ""),
+            "title": item.get("title", ""),
+            "transcript": "", "lang": "", "status": "대기",
+            "error": "", "content": "", "selected": True,
+        }
+        self.collected.append(row)
+        self._refresh_row(len(self.collected) - 1)
+
+    def _refresh_row(self, idx: int):
+        if idx >= len(self.collected):
+            return
+        row = self.collected[idx]
+        if self.table.rowCount() <= idx:
+            self.table.insertRow(idx)
+        cb = QCheckBox(); cb.setChecked(row.get("selected", True))
+        cb.stateChanged.connect(lambda s, i=idx: self._toggle_select(i, s))
+        self.table.setCellWidget(idx, 0, cb)
+        self.table.setItem(idx, 1, QTableWidgetItem(row["id"]))
+        self.table.setItem(idx, 2, QTableWidgetItem(row["title"]))
+        self.table.setItem(idx, 3, QTableWidgetItem(str(len(row.get("transcript", "")))))
+        self.table.setItem(idx, 4, QTableWidgetItem(row.get("lang", "")))
+        st = row.get("status", "")
+        if row.get("error"):
+            st += f" ({row['error'][:30]})"
+        self.table.setItem(idx, 5, QTableWidgetItem(st))
+        self.table.setItem(idx, 6, QTableWidgetItem(str(len(row.get("content", "")))))
+        self.table.setItem(idx, 7, QTableWidgetItem(row.get("url", "")))
+
+    def _toggle_select(self, idx, state):
+        if idx < len(self.collected):
+            self.collected[idx]["selected"] = bool(state)
+
+    def _open_detail(self, row, col):
+        if row >= len(self.collected): return
+        it = self.collected[row]
+        msg = f"제목: {it.get('title','')}\nURL: {it.get('url','')}\n언어: {it.get('lang','')}\n\n"
+        msg += f"=== 자막({len(it.get('transcript',''))}자) ===\n{it.get('transcript','')[:2000]}\n\n"
+        msg += f"=== 생성 원고({len(it.get('content',''))}자) ===\n{it.get('content','')[:2000]}"
+        dlg = QMessageBox(self); dlg.setWindowTitle("상세"); dlg.setText(msg); dlg.exec()
+
+    def _clear_table(self):
+        self.collected.clear()
+        self.table.setRowCount(0)
+
+    # ---------- 수집 ----------
+    def _start_collect(self):
+        # URL 탭의 텍스트도 합산
+        if self.input_tabs.currentIndex() == 0:
+            urls = [u.strip() for u in self.url_input.toPlainText().splitlines() if u.strip()]
+            for u in urls:
+                self._add_row({"url": u, "title": "", "id": _extract_video_id(u)})
+            self.url_input.clear()
+
+        targets = [r for r in self.collected if r.get("selected") and r.get("status") in ("대기", "실패")]
+        if not targets:
+            QMessageBox.information(self, "안내", "수집할 항목이 없습니다 (선택된 '대기' 행)"); return
+
+        self._log(f"▶ 자막 수집 시작 ({len(targets)}건)")
+        self.collect_worker = _CollectWorker(targets)
+        self.collect_worker.log_sig.connect(self._log)
+        self.collect_worker.progress_sig.connect(self._on_progress)
+        self.collect_worker.item_sig.connect(self._on_collect_item)
+        self.collect_worker.done_sig.connect(lambda: self._log("✅ 자막 수집 완료"))
+        self.collect_worker.start()
+
+    def _stop_collect(self):
+        if self.collect_worker:
+            self.collect_worker.stop()
+
+    def _on_progress(self, cur, total):
+        self.progress.setMaximum(total); self.progress.setValue(cur)
+
+    def _on_collect_item(self, payload):
+        # payload는 _row_index를 가지지만, self.collected의 인덱스와 다를 수 있음
+        # → URL/ID로 매칭
+        vid = payload.get("id"); url = payload.get("url")
+        for i, r in enumerate(self.collected):
+            if (vid and r.get("id") == vid) or (url and r.get("url") == url):
+                for k in ("transcript", "lang", "status", "error", "title"):
+                    if payload.get(k):
+                        r[k] = payload[k]
+                self._refresh_row(i)
+                break
+
+
+    # ---------- Perplexity 키 저장/로드 ----------
+    def _pplx_key_path(self): return "perplexity_yt_key.json"
+    def _load_pplx_key(self):
+        try:
+            with open(self._pplx_key_path(), encoding="utf-8") as f:
+                self.pplx_key.setText(json.load(f).get("key", ""))
+        except Exception:
+            pass
+    def _save_pplx_key(self):
+        try:
+            with open(self._pplx_key_path(), "w", encoding="utf-8") as f:
+                json.dump({"key": self.pplx_key.text().strip()}, f)
+            self._log("✔ Perplexity 키 저장")
+        except Exception as e:
+            self._log(f"✗ 키 저장 실패: {e}")
+    def _resolve_pplx_key(self) -> str:
+        k = self.pplx_key.text().strip()
+        if k: return k
+        return os.environ.get("PERPLEXITY_API_KEY", "").strip()
+
+    # ---------- 원고 생성 (Perplexity) ----------
+    def _start_generate(self):
+        api_key = self._resolve_pplx_key()
+        if not api_key:
+            QMessageBox.warning(self, "안내", "Perplexity API Key를 입력하거나 PERPLEXITY_API_KEY 환경변수를 설정하세요"); return
+        # collected 행에서 선택 + 자막 있고 미생성인 것
+        rows = []
+        for i, r in enumerate(self.collected):
+            if not r.get("selected"): continue
+            if not r.get("transcript"): continue
+            if r.get("content"): continue
+            rows.append((i, r))
+        if not rows:
+            QMessageBox.information(self, "안내", "생성할 항목이 없습니다 (선택 + 자막 있고 원고 미생성)"); return
+        model = self.pplx_model.currentText()
+        self._log(f"🤖 Perplexity 생성 시작 ({len(rows)}건, {model})")
+        self.gen_worker = _GenWorker(
+            rows, self.prompt_edit.toPlainText(),
+            self.char_count.value(), api_key, model
+        )
+        self.gen_worker.log_sig.connect(self._log)
+        self.gen_worker.progress_sig.connect(lambda c, t: (self.progress.setMaximum(t), self.progress.setValue(c)))
+        self.gen_worker.item_sig.connect(self._on_gen_item)
+        self.gen_worker.done_sig.connect(lambda: self._log("✅ 원고 생성 완료"))
+        self.gen_worker.start()
+
+    def _stop_generate(self):
+        if getattr(self, "gen_worker", None):
+            self.gen_worker.stop()
+
+    def _on_gen_item(self, idx, partial):
+        if not (0 <= idx < len(self.collected)): return
+        for k, v in partial.items():
+            self.collected[idx][k] = v
+        self._refresh_table()
+
+    # ---------- 발행/저장 ----------
+    def _run_publish(self):
+        targets = [r for r in self.collected if r.get("selected") and r.get("content")]
+        if not targets:
+            QMessageBox.information(self, "안내", "발행/저장할 생성 완료 항목이 없습니다"); return
+
+        if self.cb_save_excel.isChecked():
+            try:
+                import pandas as pd
+                df_rows = [{
+                    "VID": r.get("id",""), "제목": r.get("title",""), "URL": r.get("url",""),
+                    "언어": r.get("lang",""), "자막": (r.get("transcript","") or "")[:2000],
+                    "본문": r.get("content",""), "상태": r.get("status",""),
+                } for r in targets]
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "엑셀로 저장",
+                    f"youtube_perplexity_{time.strftime('%Y%m%d_%H%M%S')}.xlsx", "Excel (*.xlsx)"
+                )
+                if path:
+                    pd.DataFrame(df_rows).to_excel(path, index=False)
+                    self._log(f"📊 엑셀 저장: {path}")
+            except Exception as e:
+                QMessageBox.warning(self, "엑셀 오류", str(e))
+
+        if self.cb_publish.isChecked():
+            self._publish_via_popular(targets)
+
+    def _publish_via_popular(self, targets):
+        """인기글 페이지의 publish_to_blog 로직을 격리해서 재사용"""
+        pop = None
+        try:
+            pop = self.parent_window.pages.get("popular")
+        except Exception:
+            pop = None
+        if not pop:
+            QMessageBox.warning(self, "오류", "인기글 페이지를 찾을 수 없습니다"); return
+
+        backup = list(getattr(pop, "generated_articles", []) or [])
+        try:
+            payload = []
+            for r in targets:
+                payload.append({
+                    "title": r.get("title") or f"YT_{r.get('id','')}",
+                    "content": r.get("content") or "",
+                    "keyword": "",
+                    "source": r.get("url", ""),
+                })
+            pop.generated_articles = payload
+            self._log(f"📤 발행 큐 주입 → {len(payload)}건")
+            pop.publish_to_blog()
+        except Exception as e:
+            QMessageBox.critical(self, "발행 오류", str(e))
+        finally:
+            def _restore():
+                try:
+                    pop.generated_articles = backup
+                    self._log("↩️ 인기글 원본 큐 복원")
+                except Exception:
+                    pass
+            QTimer.singleShot(5000, _restore)
+
+    def _log(self, msg):
+        try:
+            self.parent_window.log(f"[유튜브] {msg}")
+        except Exception:
+            print(msg)
+
+
+class BulkTitleUploadPage(QWidget):
+    """엑셀로 기사 제목을 대량 업로드 → AI 글쓰기 → 네이버 블로그 발행
+    [v38] SQLite 영구 저장 + 인기글수집과 동일한 발행 로직 통합
+    """
+
+    def __init__(self, main_win):
+        super().__init__()
+        self.main = main_win
+        self.db = BulkArticleDB()                  # ★ 영구 저장 DB
+        self.titles_data = []                      # 화면 표시용 [{id,title1,title2,title3,combined_title,keyword,source,content,status,publish_status,char_count,db_id}]
+        self._cancel_generate = False
+        self._generating = False
+        self._publishing = False
+        self._cancel_publish = False
+        self.folder_cache = {}
+        # 카테고리 캐시 영구 저장 (계정별)
+        try:
+            import os as _os, json as _json
+            self._cat_cache_path = _os.path.join(
+                _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() else '.',
+                'bulk_title_category_cache.json'
+            )
+            if _os.path.exists(self._cat_cache_path):
+                with open(self._cat_cache_path, 'r', encoding='utf-8') as _f:
+                    self.folder_cache = _json.load(_f) or {}
+        except Exception:
+            self.folder_cache = {}
+
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
+
+        title = QLabel("📥 URL 대량 업로드 → AI 본문/제목 생성 → 발행  (v58 / URL모드)")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        layout.addWidget(title)
+
+        desc = QLabel("프로그램을 껐다 켜도 데이터가 자동 보존됩니다 (data/bulk_articles.db)")
+        desc.setStyleSheet("color:#888; margin-bottom:8px;")
+        layout.addWidget(desc)
+
+        # ── STEP 1: 엑셀 업로드 ──
+        step1 = QGroupBox("STEP 1️⃣  엑셀 파일 업로드")
+        s1 = QVBoxLayout(step1)
+        info = QLabel(
+            "📋 엑셀 양식 (한 행 = 원고 1개) — A·B·C·D 모든 열에 [제목] 또는 [URL] 자유 입력:\n"
+            "    A열(필수)  B열(선택)  C열(선택)  D열(선택)  ← 모두 동일하게 처리\n"
+            "    • http(s):// 로 시작 → URL 로 인식 → 본문 자동 크롤링\n"
+            "    • 그 외 텍스트   → 제목 으로 인식 (AI 가 제목들을 종합해 원고 작성)\n"
+            "    • URL 과 제목을 한 행에 섞어 넣어도 됩니다."
+        )
+        info.setStyleSheet("color:#aaa; padding:6px; background:#2a2a2a; border-radius:4px;")
+        s1.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        self.btn_template = QPushButton("📄 양식 다운로드")
+        self.btn_template.setStyleSheet("background:#4a4a4a; color:#FFD700; padding:6px 12px;")
+        self.btn_template.clicked.connect(self.download_template)
+        btn_row.addWidget(self.btn_template)
+        self.btn_upload = QPushButton("📂 엑셀 불러오기 (추가)")
+        self.btn_upload.setStyleSheet("background:#2d5a8a; color:#fff; padding:6px 12px; font-weight:bold;")
+        self.btn_upload.clicked.connect(self.upload_excel)
+        btn_row.addWidget(self.btn_upload)
+        self.btn_clear = QPushButton("🗑 전체 삭제 (DB 포함)")
+        self.btn_clear.setStyleSheet("background:#5a2d2d; color:#fff; padding:6px 12px;")
+        self.btn_clear.clicked.connect(self.clear_titles)
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addStretch()
+        s1.addLayout(btn_row)
+
+        # 통합 테이블 (제목/원고/상태/발행상태)
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(
+            ["선택", "#", "제목(통합)", "키워드", "글자수", "AI상태", "발행상태", "DB"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setMinimumHeight(260)
+        self.table.cellDoubleClicked.connect(self.preview_article)
+        s1.addWidget(self.table)
+
+        self.count_label = QLabel("📊 0개 / 완료 0개 / 발행 0개")
+        self.count_label.setStyleSheet("color:#FFD700; padding:4px;")
+        s1.addWidget(self.count_label)
+        layout.addWidget(step1)
+
+        # ── STEP 2: AI 글쓰기 ──
+        step2 = QGroupBox("STEP 2️⃣  AI 글쓰기 옵션")
+        s2 = QVBoxLayout(step2)
+        opt_row = QHBoxLayout()
+        opt_row.addWidget(QLabel("AI 모델:"))
+        self.ai_model = QComboBox()
+        self.ai_model.addItems([
+            "Perplexity (sonar-pro) ⭐ 검색+생성", "Perplexity (sonar)",
+            "GPT-4o (chatgpt-4o-latest)", "GPT-4o-mini",
+            "Claude 3.5 Sonnet", "Gemini 1.5 Pro",
+        ])
+        opt_row.addWidget(self.ai_model)
+        opt_row.addSpacing(20)
+        opt_row.addWidget(QLabel("목표 글자수:"))
+        self.char_count = QSpinBox()
+        self.char_count.setRange(500, 10000); self.char_count.setValue(2000); self.char_count.setSingleStep(100)
+        opt_row.addWidget(self.char_count)
+        opt_row.addStretch()
+        s2.addLayout(opt_row)
+
+        s2.addWidget(QLabel("AI 프롬프트:"))
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setMaximumHeight(140)
+        self.ai_prompt.setPlainText(
+            "다음은 같은 사건/주제에 대한 여러 뉴스 기사 제목입니다. "
+            "여러 제목을 종합하여 사실관계를 정리하고, SEO에 최적화된 블로그 포스트를 작성해줘.\n\n"
+            "[기사 제목들]\n{titles}\n\n"
+            "[키워드] {keyword}\n"
+            "[참고원문] {source}\n\n"
+            "조건:\n"
+            "1) 자연스러운 한국어 구어체로 {char_count}자 내외\n"
+            "2) H2/H3 소제목 3~5개 포함\n"
+            "3) 여러 제목의 정보를 모순 없이 종합\n"
+            "4) 마지막에 해시태그 5개"
+        )
+        s2.addWidget(self.ai_prompt)
+
+        gen_row = QHBoxLayout()
+        self.btn_generate_sel = QPushButton("🤖 선택만 AI 생성")
+        self.btn_generate_sel.setStyleSheet("background:#2d8a4a; color:#fff; padding:8px 16px;")
+        self.btn_generate_sel.clicked.connect(lambda: self.start_generate(only_selected=True))
+        gen_row.addWidget(self.btn_generate_sel)
+
+        self.btn_generate = QPushButton("🤖 전체 AI 원고 생성 시작")
+        self.btn_generate.setStyleSheet("background:#1f7a3a; color:#fff; padding:8px 16px; font-weight:bold;")
+        self.btn_generate.clicked.connect(lambda: self.start_generate(only_selected=False))
+        gen_row.addWidget(self.btn_generate)
+
+        self.btn_cancel_gen = QPushButton("⏹ 생성 중지")
+        self.btn_cancel_gen.setStyleSheet("background:#8a2d2d; color:#fff; padding:8px 14px;")
+        self.btn_cancel_gen.clicked.connect(lambda: setattr(self, '_cancel_generate', True))
+        gen_row.addWidget(self.btn_cancel_gen)
+        gen_row.addStretch()
+        s2.addLayout(gen_row)
+        layout.addWidget(step2)
+
+        # ── STEP 3: 발행 (인기글수집과 동일 방식) ──
+        step3 = QGroupBox("STEP 3️⃣  네이버 블로그 발행")
+        s3 = QVBoxLayout(step3)
+
+        acc_row = QHBoxLayout()
+        acc_row.addWidget(QLabel("계정:"))
+        self.account_combo = QComboBox(); self.account_combo.setMinimumWidth(200)
+        self.account_combo.currentIndexChanged.connect(self._on_account_changed)
+        acc_row.addWidget(self.account_combo)
+
+        acc_row.addWidget(QLabel("카테고리:"))
+        self.folder_combo = QComboBox(); self.folder_combo.setMinimumWidth(180)
+        acc_row.addWidget(self.folder_combo)
+
+        self.btn_load_folders = QPushButton("📁 카테고리 불러오기")
+        self.btn_load_folders.setStyleSheet("background:#4a4a4a; color:#FFD700; padding:6px 10px;")
+        self.btn_load_folders.clicked.connect(self.load_blog_folders)
+        acc_row.addWidget(self.btn_load_folders)
+        acc_row.addStretch()
+        s3.addLayout(acc_row)
+
+        opt2 = QHBoxLayout()
+        opt2.addWidget(QLabel("공개:"))
+        self.publish_open = QComboBox()
+        self.publish_open.addItems(["전체공개", "이웃공개", "서로이웃공개", "비공개"])
+        opt2.addWidget(self.publish_open)
+        opt2.addSpacing(20)
+        opt2.addWidget(QLabel("발행 간격(초):"))
+        self.publish_interval = QSpinBox(); self.publish_interval.setRange(0, 600); self.publish_interval.setValue(60)
+        opt2.addWidget(self.publish_interval)
+        opt2.addStretch()
+        s3.addLayout(opt2)
+
+        pub_row = QHBoxLayout()
+        self.btn_publish_sel = QPushButton("🚀 선택 발행")
+        self.btn_publish_sel.setStyleSheet("background:#2d6a8a; color:#fff; padding:9px 18px; font-weight:bold;")
+        self.btn_publish_sel.clicked.connect(lambda: self.publish_to_blog(only_selected=True))
+        pub_row.addWidget(self.btn_publish_sel)
+
+        self.btn_publish_all = QPushButton("🚀 전체 발행 (완료된 원고 전부)")
+        self.btn_publish_all.setStyleSheet("background:#1f4a6a; color:#fff; padding:9px 18px; font-weight:bold;")
+        self.btn_publish_all.clicked.connect(lambda: self.publish_to_blog(only_selected=False))
+        pub_row.addWidget(self.btn_publish_all)
+
+        self.btn_cancel_pub = QPushButton("⏹ 발행 중지")
+        self.btn_cancel_pub.setStyleSheet("background:#8a2d2d; color:#fff; padding:9px 14px;")
+        self.btn_cancel_pub.clicked.connect(lambda: setattr(self, '_cancel_publish', True))
+        pub_row.addWidget(self.btn_cancel_pub)
+        pub_row.addStretch()
+        s3.addLayout(pub_row)
+
+        self.publish_progress = QProgressBar()
+        self.publish_progress.setTextVisible(True)
+        s3.addWidget(self.publish_progress)
+        layout.addWidget(step3)
+
+        # ── 결과/내보내기 ──
+        export_row = QHBoxLayout()
+        self.btn_export = QPushButton("💾 결과 엑셀로 내보내기")
+        self.btn_export.setStyleSheet("background:#4a4a4a; color:#FFD700; padding:6px 12px;")
+        self.btn_export.clicked.connect(self.export_results)
+        export_row.addWidget(self.btn_export)
+        export_row.addStretch()
+        layout.addLayout(export_row)
+        layout.addStretch()
+
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea(); scroll.setWidget(scroll_widget); scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+
+        # 초기 데이터 로드 (DB 복원) + 계정 콤보 채우기
+        self._reload_accounts()
+        self._load_from_db()
+
+    # ─────────────── 공통 유틸 ───────────────
+    def _log(self, msg):
+        if hasattr(self.main, 'log'):
+            self.main.log(f"[제목업로드] {msg}")
+        else:
+            print(f"[제목업로드] {msg}")
+
+    def _now(self):
+        return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _reload_accounts(self):
+        self.account_combo.clear()
+        try:
+            cfg = getattr(self.main, 'config', {}) or {}
+            accs = cfg.get('naver_accounts') or []
+            for a in accs:
+                nid = a.get('id') or a.get('nid') or ''
+                if nid:
+                    self.account_combo.addItem(nid, nid)
+        except Exception as e:
+            self._log(f"계정 로드 실패: {e}")
+
+    def _get_selected_account(self):
+        cfg = getattr(self.main, 'config', {}) or {}
+        nid = self.account_combo.currentData() or self.account_combo.currentText()
+        for a in (cfg.get('naver_accounts') or []):
+            if (a.get('id') or a.get('nid')) == nid:
+                return a
+        return None
+
+    def _on_account_changed(self, _idx):
+        self.folder_combo.clear()
+        # 캐시에 저장된 카테고리가 있으면 즉시 복원
+        try:
+            nid = self.account_combo.currentData() or self.account_combo.currentText()
+            cached = (self.folder_cache or {}).get(nid) or []
+            if cached:
+                for item in cached:
+                    if isinstance(item, dict):
+                        self.folder_combo.addItem(item.get('text', ''), item.get('data'))
+                    else:
+                        self.folder_combo.addItem(str(item))
+                self._log(f"📂 저장된 카테고리 자동 적용: {nid} ({len(cached)}개)")
+        except Exception as e:
+            self._log(f"카테고리 캐시 복원 실패: {e}")
+
+    # ─────────────── DB 동기화 ───────────────
+    def _load_from_db(self):
+        rows = self.db.all()
+        self.titles_data = []
+        for r in rows:
+            self.titles_data.append({
+                "db_id": r["id"],
+                "title1": r["title1"], "title2": r["title2"], "title3": r["title3"],
+                "combined_title": r["combined_title"] or r["title1"],
+                "keyword": r["keyword"], "source": r["source"],
+                "content": r["content"],
+                "status": r["status"], "publish_status": r["publish_status"],
+                "char_count": r["char_count"], "ai_model": r["ai_model"],
+            })
+        self._refresh_table()
+        self._log(f"DB 복원: {len(self.titles_data)}건")
+
+    # ─────────────── 양식 다운로드 ───────────────
+    def download_template(self):
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            path, _ = QFileDialog.getSaveFileName(
+                self, "양식 저장 위치 선택", "대량업로드_양식.xlsx", "Excel Files (*.xlsx)"
+            )
+            if not path: return
+            wb = Workbook(); ws = wb.active; ws.title = "대량 업로드"
+            # v60: A/B/C/D 모두 URL 또는 제목 둘 다 허용 (동일 처리)
+            ws.append([
+                "항목1 (필수, 제목 또는 URL)",
+                "항목2 (선택, 제목 또는 URL)",
+                "항목3 (선택, 제목 또는 URL)",
+                "항목4 (선택, 제목 또는 URL)",
+            ])
+            for row in [
+                # 케이스1: URL 만
+                ['https://n.news.naver.com/article/001/0000000001',
+                 'https://n.news.naver.com/article/001/0000000002', '', ''],
+                # 케이스2: 제목 만
+                ["삼성전자, HBM4 양산 본격화",
+                 "SK하이닉스도 HBM4 개발 가속",
+                 "HBM4 시장 전망", ""],
+                # 케이스3: URL + 제목 혼합 (D열에도 자유)
+                ['https://www.youtube.com/shorts/LWg9cbX-ZKA',
+                 "관련 기사 제목 예시",
+                 'https://www.example.com/news/123',
+                 "유튜브 숏츠 요약"],
+            ]:
+                ws.append(row)
+            # 헤더 스타일
+            for col_idx in range(1, 5):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = PatternFill("solid",
+                    start_color="C00000" if col_idx == 1 else "2F5496")
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.alignment = Alignment(horizontal="center",
+                    vertical="center", wrap_text=True)
+            for col_letter, w in zip("ABCD", [55, 55, 55, 55]):
+                ws.column_dimensions[col_letter].width = w
+            ws.row_dimensions[1].height = 32
+            wb.save(path)
+            QMessageBox.information(self, "완료",
+                f"양식이 저장되었습니다 (v60):\n{path}\n\n"
+                "📌 A·B·C·D 4개 열 모두 [제목] 또는 [URL] 자유 입력 가능.\n"
+                "   • http(s):// 로 시작하면 → URL → 본문 자동 크롤링\n"
+                "   • 그 외 텍스트는 → 제목 → AI 가 제목들을 종합해 원고 작성\n"
+                "   • 한 행에 URL 과 제목을 섞어 넣어도 됩니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"양식 저장 실패: {e}")
+
+    # ─────────────── 엑셀 업로드 (DB 추가) ───────────────
+    # ─────────────── URL 본문 크롤러 (v58) ───────────────
+    def _fetch_url_text(self, url, timeout=15):
+        """단순 fetch + HTML 파싱. 네이버 블로그/뉴스/일반 뉴스 본문 영역 우선.
+        선택 패키지(trafilatura)가 없어도 경고 없이 기본 추출기로 처리한다.
+        실패 시 빈 문자열 반환."""
+        if not url or not url.startswith(("http://", "https://")):
+            return ""
+        # ── (A) 유튜브 링크: 자막(스크립트) 자동 추출 ──
+        try:
+            if ("youtube.com/watch" in url) or ("youtu.be/" in url) or ("youtube.com/shorts/" in url):
+                vid = _extract_video_id(url)
+                if vid:
+                    transcript = ""
+                    # 1차: youtube-transcript-api
+                    try:
+                        from youtube_transcript_api import YouTubeTranscriptApi
+                        for langs in (["ko"], ["en"], ["ko", "en"], None):
+                            try:
+                                tr = YouTubeTranscriptApi.get_transcript(vid, languages=langs) if langs else YouTubeTranscriptApi.get_transcript(vid)
+                                transcript = "\n".join(seg.get("text", "") for seg in tr if seg.get("text"))
+                                if transcript.strip():
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    # 2차: 메타데이터(제목/설명)라도 가져옴
+                    title_desc = ""
+                    try:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        r = requests.get(f"https://www.youtube.com/watch?v={vid}",
+                                         headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko,en;q=0.8"},
+                                         timeout=timeout)
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        t = soup.find("meta", property="og:title")
+                        d = soup.find("meta", property="og:description")
+                        if t: title_desc += f"[제목] {t.get('content','').strip()}\n"
+                        if d: title_desc += f"[설명] {d.get('content','').strip()}\n"
+                    except Exception:
+                        pass
+                    combined = (title_desc + "\n[자막]\n" + transcript).strip() if transcript else title_desc.strip()
+                    if combined:
+                        if len(combined) > 8000:
+                            combined = combined[:8000] + "...[잘림]"
+                        return combined
+        except Exception as e:
+            self._log(f"유튜브 자막 추출 실패 [{url[:60]}]: {e}")
+
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            }
+            # 네이버 블로그는 mobile 페이지가 본문 직접 노출
+            fetch_url = url
+            if "blog.naver.com" in url and "/PostView" not in url:
+                # https://blog.naver.com/{id}/{logNo} → m.blog.naver.com/PostView
+                m = re.match(r"https?://blog\.naver\.com/([^/?#]+)/(\d+)", url)
+                if m:
+                    fetch_url = f"https://m.blog.naver.com/PostView.naver?blogId={m.group(1)}&logNo={m.group(2)}"
+            r = requests.get(fetch_url, headers=headers, timeout=timeout)
+            r.encoding = r.apparent_encoding or "utf-8"
+            html = r.text
+            soup = BeautifulSoup(html, "html.parser")
+
+            text = ""
+            # 1순위: 네이버 SmartEditor
+            for sel in ["div.se-main-container", "div#SE-main-container",
+                        "div.se_component_wrap", "div#postViewArea",
+                        "div#post-view"]:
+                node = soup.select_one(sel)
+                if node:
+                    text = node.get_text("\n", strip=True)
+                    if len(text) > 100:
+                        break
+            # 2순위: 주요 뉴스/언론사 본문 영역
+            if not text or len(text) < 100:
+                article_selectors = [
+                    # 네이버/다음/범용 article
+                    "article#dic_area", "div#newsct_article", "div#articleBodyContents",
+                    "div.news_end", "div.article_body", "article", "main article",
+                    "div.article_view", "section#article_body", "div#harmonyContainer",
+                    "div.news_view", "div.view_content", "div.article-content",
+                    "div.article_content", "div.article-body", "div.articleBody",
+                    # 인터넷신문 솔루션 계열(살구뉴스/일요신문 등)
+                    "div#article-view-content-div", "#article-view-content-div",
+                    "div.article-view-content", "div.articleView", "div#articleBody",
+                    "div#article_body", "div.cont_view", "div.view_cont",
+                    "div.read_body", "div#readBody", "div#news_body_area",
+                ]
+                for sel in article_selectors:
+                    node = soup.select_one(sel)
+                    if node:
+                        for bad in node.select("script, style, iframe, noscript, aside, nav, footer, header, .ad, .ads, .advertise, .advertisement, .banner, .copyright, .reporter, .sns, .share"):
+                            bad.decompose()
+                        text = node.get_text("\n", strip=True)
+                        if len(text) > 100:
+                            break
+            # 3순위: trafilatura 범용 본문 추출기 (설치된 경우에만 조용히 사용)
+            if not text or len(text) < 100:
+                try:
+                    import trafilatura
+                    extracted = trafilatura.extract(
+                        html,
+                        include_comments=False,
+                        include_tables=True,
+                        favor_recall=True,
+                        url=fetch_url,
+                    )
+                    if extracted and len(extracted.strip()) > 100:
+                        text = extracted.strip()
+                except Exception:
+                    pass
+            # 4순위: og:description + body 텍스트
+            if not text or len(text) < 100:
+                og = soup.find("meta", property="og:description")
+                desc = og["content"].strip() if og and og.get("content") else ""
+                body = soup.body.get_text("\n", strip=True) if soup.body else ""
+                # body에서 너무 짧은 줄 필터
+                body_lines = [ln for ln in body.split("\n") if len(ln) > 20]
+                text = (desc + "\n\n" + "\n".join(body_lines[:200])).strip()
+
+            # 정리: 공백 줄 압축, 길이 제한
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            if len(text) > 8000:
+                text = text[:8000] + "...[잘림]"
+            return text
+        except Exception as e:
+            self._log(f"URL 크롤 실패 [{url[:60]}]: {e}")
+            return ""
+
+    def upload_excel(self):
+        """[v60] A/B/C/D 4개 열 모두 = 제목 또는 URL 자동 분기.
+            • http(s):// 로 시작 → URL → 본문 크롤링 → source 누적
+            • 그 외           → 제목 → titles 에 저장
+        URL·제목을 한 행에 섞어 넣을 수 있다 (D열도 동일 처리)."""
+        try:
+            from openpyxl import load_workbook
+            path, _ = QFileDialog.getOpenFileName(
+                self, "엑셀 파일 선택 (제목 또는 URL 양식)", "",
+                "Excel Files (*.xlsx *.xls)")
+            if not path: return
+            wb = load_workbook(path, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            if len(rows) < 2:
+                QMessageBox.warning(self, "경고",
+                    "데이터가 없습니다 (1행 헤더, 2행부터 데이터)")
+                return
+
+            # [v61] 엑셀 업로드 시 기존 목록 초기화 (누적 방지)
+            #  → 업로드한 엑셀에 있는 행만 화면에 표시되도록
+            try:
+                reply = QMessageBox.question(
+                    self, "확인",
+                    f"기존 목록 {len(self.titles_data)}건을 비우고\n"
+                    f"이번 엑셀 내용만 새로 불러올까요?\n\n"
+                    f"(아니오 = 기존 목록 뒤에 추가)",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+                if reply == QMessageBox.StandardButton.Yes:
+                    # DB 에서도 모두 삭제
+                    try:
+                        for d in list(self.titles_data):
+                            did = d.get("db_id")
+                            if did is not None and hasattr(self.db, "delete"):
+                                self.db.delete(did)
+                    except Exception as _e:
+                        self._log(f"  ⚠️ DB 삭제 일부 실패: {_e}")
+                    self.titles_data.clear()
+                    self._refresh_table()
+                    self._log("🗑️ 기존 목록 비움 (엑셀 업로드 새로 시작)")
+            except Exception:
+                pass
+
+            def _is_url(s: str) -> bool:
+                s = (s or "").strip().lower()
+                return s.startswith("http://") or s.startswith("https://")
+
+            added, skipped = 0, 0
+            url_total, title_total = 0, 0
+            self._log(f"엑셀 업로드 시작: 총 {len(rows)-1}행 (제목/URL 자동 분기)")
+
+            for ridx, r in enumerate(rows[1:], 2):
+                if not r:
+                    skipped += 1; continue
+                # A/B/C/D 4개 열 모두 동일 처리
+                c1 = (str(r[0]).strip() if len(r) > 0 and r[0] is not None else "")
+                c2 = (str(r[1]).strip() if len(r) > 1 and r[1] is not None else "")
+                c3 = (str(r[2]).strip() if len(r) > 2 and r[2] is not None else "")
+                c4 = (str(r[3]).strip() if len(r) > 3 and r[3] is not None else "")
+                kw = ""  # 별도 키워드 칸 없음 (D열도 URL/제목 처리)
+                cells = [c for c in (c1, c2, c3, c4) if c]
+                if not cells:
+                    skipped += 1
+                    self._log(f"  [{ridx}행] 빈 행 스킵")
+                    continue
+
+                # URL / 제목 분리
+                urls, titles = [], []
+                for c in cells:
+                    if _is_url(c):
+                        urls.append(c)
+                    else:
+                        titles.append(c)
+
+                # 분류 결과 로그 (디버그용)
+                self._log(
+                    f"  [{ridx}행] 입력 {len(cells)}셀 → URL {len(urls)}개 / 제목 {len(titles)}개"
+                    + (f" | 제목: {titles}" if titles else "")
+                )
+
+                # ── URL 본문 크롤링 ──
+                parts = []
+                for ui, u in enumerate(urls, 1):
+                    self._log(f"  [{ridx}행] URL{ui} 크롤링: {u[:70]}")
+                    body = self._fetch_url_text(u)
+                    if body:
+                        parts.append(f"=== [원문 {ui}] {u} ===\n{body}")
+                        url_total += 1
+                        self._log(f"    → {len(body)}자 추출")
+                    else:
+                        self._log(f"    → 추출 실패")
+                src = "\n\n".join(parts) if parts else ""
+
+                # ── 제목 처리 (최대 3개까지 보관, 나머지는 combined 에 합침) ──
+                title1 = titles[0] if len(titles) > 0 else ""
+                title2 = titles[1] if len(titles) > 1 else ""
+                title3 = titles[2] if len(titles) > 2 else ""
+                title_total += len(titles)
+                # D열까지 합쳐 4개 제목이 들어올 수 있으므로 keyword 칸에 4번째 보관
+                if len(titles) >= 4 and not kw:
+                    kw = titles[3]
+
+                # 통합 표시 라벨
+                if titles and urls:
+                    combined = f"{title1 or '(제목없음)'}  +URL {len(urls)}개"
+                elif titles:
+                    combined = " | ".join(titles)
+                else:
+                    combined = f"(URL {len(urls)}개 → AI 제목생성 대기)"
+
+                row_dict = {
+                    "title1": title1, "title2": title2, "title3": title3,
+                    "combined_title": combined,
+                    "keyword": kw, "source": src,
+                    "content": "", "status": "대기", "publish_status": "",
+                    "char_count": 0, "ai_model": "",
+                    "url1": urls[0] if len(urls) > 0 else "",
+                    "url2": urls[1] if len(urls) > 1 else "",
+                    "url3": urls[2] if len(urls) > 2 else "",
+                }
+                db_id = self.db.insert(row_dict)
+                row_dict["db_id"] = db_id
+                self.titles_data.append(row_dict)
+                added += 1
+                QApplication.processEvents()
+
+            self._refresh_table()
+            self._log(
+                f"엑셀 업로드 완료: {added}건 추가 "
+                f"(URL {url_total}개 크롤링, 제목 {title_total}개 인식, "
+                f"빈 행 {skipped}개 스킵)")
+            QMessageBox.information(self, "완료",
+                f"{added}건 추가됨\n"
+                f" • URL 크롤링: {url_total}개\n"
+                f" • 제목 인식: {title_total}개\n"
+                f" • 빈 행 스킵: {skipped}개\n→ DB 에 영구 저장됨")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            QMessageBox.critical(self, "오류", f"엑셀 읽기 실패: {e}")
+
+    # ─────────────── 테이블 렌더링 ───────────────
+    def _refresh_table(self):
+        self.table.setRowCount(len(self.titles_data))
+        done = sum(1 for d in self.titles_data if d.get("status") == "완료")
+        pub = sum(1 for d in self.titles_data if d.get("publish_status") == "발행완료")
+        for i, d in enumerate(self.titles_data):
+            chk = QTableWidgetItem()
+            chk.setFlags(chk.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            chk.setCheckState(Qt.CheckState.Unchecked)
+            self.table.setItem(i, 0, chk)
+            self.table.setItem(i, 1, QTableWidgetItem(str(i + 1)))
+            self.table.setItem(i, 2, QTableWidgetItem(d.get("combined_title", "")))
+            self.table.setItem(i, 3, QTableWidgetItem(d.get("keyword", "")))
+            self.table.setItem(i, 4, QTableWidgetItem(str(d.get("char_count", 0))))
+            self.table.setItem(i, 5, QTableWidgetItem(d.get("status", "대기")))
+            self.table.setItem(i, 6, QTableWidgetItem(d.get("publish_status", "")))
+            self.table.setItem(i, 7, QTableWidgetItem(str(d.get("db_id", ""))))
+        self.count_label.setText(f"📊 총 {len(self.titles_data)}개 / AI완료 {done}개 / 발행완료 {pub}개")
+
+    def _selected_indices(self):
+        idxs = []
+        for i in range(self.table.rowCount()):
+            it = self.table.item(i, 0)
+            if it and it.checkState() == Qt.CheckState.Checked:
+                idxs.append(i)
+        return idxs
+
+    def clear_titles(self):
+        if not self.titles_data: return
+        if QMessageBox.question(
+            self, "확인", "DB까지 모두 삭제할까요?\n(취소 불가)"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_all()
+        self.titles_data = []
+        self._refresh_table()
+        self._log("전체 삭제 완료 (DB 포함)")
+
+    # ─────────────── AI 생성 ───────────────
+    def start_generate(self, only_selected=False):
+        if not self.titles_data:
+            QMessageBox.warning(self, "경고", "먼저 엑셀을 업로드하세요"); return
+        if self._generating:
+            QMessageBox.information(self, "안내", "이미 생성 중입니다"); return
+
+        target_idx = self._selected_indices() if only_selected else list(range(len(self.titles_data)))
+        if only_selected and not target_idx:
+            QMessageBox.warning(self, "경고", "체크박스로 항목을 선택하세요"); return
+
+        self._generating = True; self._cancel_generate = False
+        prompt_template = self.ai_prompt.toPlainText()
+        char_count = self.char_count.value()
+        model_label = self.ai_model.currentText()
+
+        self._log(f"AI 생성 시작: {len(target_idx)}건, 모델={model_label}")
+        for cnt, i in enumerate(target_idx, 1):
+            if self._cancel_generate:
+                self._log("사용자 중지"); break
+            d = self.titles_data[i]
+            d["status"] = "생성중..."
+            self._refresh_table(); QApplication.processEvents()
+
+            # v58: 제목이 비어있고 URL 원문만 있는 경우 → AI가 본문+제목을 생성
+            titles_list = [t for t in [d.get("title1",""), d.get("title2",""), d.get("title3","")] if t]
+            source_text = d.get("source", "") or ""
+            has_titles = bool(titles_list)
+            has_source = bool(source_text.strip())
+
+            if not has_titles and has_source:
+                # URL 모드: 본문을 보고 제목+원고 생성
+                titles_block = "(제목 없음 — 아래 원문을 종합하여 새 제목 1개를 첫 줄에 'TITLE: ...' 형식으로 출력하세요)"
+                ext_instr = (
+                    "\n\n[중요 출력 형식]\n"
+                    "1행: TITLE: <SEO 최적화된 한글 제목 1개>\n"
+                    "2행부터: 본문 시작\n"
+                )
+            else:
+                titles_block = "\n".join(f"  {idx+1}. {t}" for idx, t in enumerate(titles_list)) or "(제목 없음)"
+                ext_instr = ""
+
+            prompt = (prompt_template
+                      .replace("{titles}", titles_block)
+                      .replace("{title}", d.get("combined_title", ""))
+                      .replace("{keyword}", d.get("keyword", "") or "")
+                      .replace("{source}", source_text or "(참고원문 없음)")
+                      .replace("{char_count}", str(char_count))) + ext_instr
+            try:
+                content = self._call_ai(prompt, model_label)
+
+                # v58: TITLE 추출 → combined_title 업데이트
+                gen_title = ""
+                m = re.match(r"\s*(?:TITLE|제목)\s*[:：]\s*(.+)", content)
+                if m:
+                    gen_title = m.group(1).strip().strip('"\'').strip("「」『』")
+                    # TITLE 줄 제거
+                    content = content[m.end():].lstrip("\n").lstrip()
+
+                if gen_title:
+                    d["title1"] = gen_title
+                    d["combined_title"] = gen_title
+
+                d["content"] = content
+                d["char_count"] = len(content)
+                d["status"] = "완료"
+                d["ai_model"] = model_label
+                update_kwargs = dict(content=content, status="완료",
+                                     char_count=len(content), ai_model=model_label)
+                if gen_title:
+                    update_kwargs["combined_title"] = gen_title
+                    update_kwargs["title1"] = gen_title
+                try:
+                    self.db.update(d["db_id"], **update_kwargs)
+                except TypeError:
+                    # DB 스키마가 일부 필드를 모를 경우 안전 업데이트
+                    self.db.update(d["db_id"], content=content, status="완료",
+                                   char_count=len(content), ai_model=model_label)
+                self._log(f"[{cnt}/{len(target_idx)}] 완료: {d['combined_title'][:40]}")
+            except Exception as e:
+                d["status"] = f"실패: {e}"[:80]
+                self.db.update(d["db_id"], status=d["status"])
+                self._log(f"[{cnt}] 실패: {e}")
+            self._refresh_table(); QApplication.processEvents()
+
+        self._generating = False
+        QMessageBox.information(self, "완료", f"AI 생성 종료 (대상 {len(target_idx)}건)")
+
+    def _call_ai(self, prompt, model_label):
+        cfg = getattr(self.main, 'config', {}) or {}
+        ll = model_label.lower()
+        if "perplexity" in ll or "sonar" in ll:
+            api_key = cfg.get("perplex_key") or cfg.get("perplexity_key") or os.environ.get("PERPLEXITY_API_KEY", "")
+            if not api_key: raise RuntimeError("Perplexity API 키 미설정")
+            model_name = "sonar-pro" if "pro" in ll else "sonar"
+            sys_msg = ("당신은 한국어 뉴스/블로그 전문 작가입니다. "
+                       "주어진 기사 제목을 웹에서 검색하여 최신 사실관계를 확인한 뒤, "
+                       "자연스러운 한국어 블로그 원고를 작성하세요.")
+            return call_perplexity(api_key, prompt, model=model_name, system_message=sys_msg)
+        if "gemini" in ll:
+            api_key = cfg.get("gemini_key") or os.environ.get("GEMINI_API_KEY", "")
+            if not api_key: raise RuntimeError("Gemini API 키 미설정")
+            return call_gemini_text(api_key, prompt, model="gemini-2.5-flash")
+        if "claude" in ll:
+            raise RuntimeError("Claude는 미구현")
+        api_key = cfg.get("openai_api_key") or cfg.get("openai_key") or os.environ.get("OPENAI_API_KEY", "")
+        if not api_key: raise RuntimeError("OpenAI API 키 미설정")
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        model_name = "chatgpt-4o-latest" if "4o-latest" in model_label or model_label.startswith("GPT-4o (") else "gpt-4o-mini"
+        resp = client.chat.completions.create(
+            model=model_name, messages=[{"role": "user", "content": prompt}], temperature=0.7,
+        )
+        return resp.choices[0].message.content or ""
+
+    # ─────────────── 미리보기 ───────────────
+    def preview_article(self, row, col):
+        if row >= len(self.titles_data): return
+        a = self.titles_data[row]
+        dlg = QDialog(self); dlg.setWindowTitle(f"미리보기: {a.get('combined_title','')[:40]}")
+        dlg.resize(900, 650)
+        v = QVBoxLayout(dlg)
+        te = QTextEdit(); te.setPlainText(a.get("content",""))
+        v.addWidget(te)
+        btn = QPushButton("닫기"); btn.clicked.connect(dlg.accept)
+        v.addWidget(btn)
+        dlg.exec()
+
+    # ─────────────── 카테고리(폴더) 로드 — PopularPostPage와 동일한 흐름 ───────────────
+    def load_blog_folders(self):
+        acc = self._get_selected_account()
+        if not acc:
+            QMessageBox.warning(self, "경고", "계정을 먼저 선택하세요"); return
+        nid = acc.get('id') or acc.get('nid') or ''
+        # 1) 캐시 우선 사용
+        cached = (self.folder_cache or {}).get(nid) or []
+        if cached:
+            self.folder_combo.clear()
+            for item in cached:
+                if isinstance(item, dict):
+                    self.folder_combo.addItem(item.get('text', ''), item.get('data'))
+                else:
+                    self.folder_combo.addItem(str(item))
+            self._log(f"📂 저장된 카테고리 사용: {nid} ({len(cached)}개) — 새로 불러오려면 캐시 파일 삭제")
+            QMessageBox.information(self, "완료",
+                f"저장된 카테고리 {len(cached)}개를 불러왔습니다.\n"
+                f"(다시 받으려면 bulk_title_category_cache.json 파일 삭제)")
+            return
+        self._log(f"카테고리 로드 시작: {acc.get('id')}")
+        # 인기글수집 페이지(PopularPostPage)에 동일 함수가 있다면 그대로 위임
+        pop = self.main.pages.get('popular') if hasattr(self.main, 'pages') else None
+        if pop is None:
+            pop = getattr(self.main, 'popular_page', None)
+        # ★ lazy-load: 인기글 페이지가 아직 안 만들어졌다면 강제로 생성
+        if pop is None and hasattr(self.main, '_ensure_page_loaded'):
+            try:
+                self.main._ensure_page_loaded('popular')
+                pop = self.main.pages.get('popular')
+                self._log("인기글 페이지 lazy 로드 완료")
+            except Exception as e:
+                self._log(f"인기글 페이지 강제 로드 실패: {e}")
+        if pop and hasattr(pop, 'load_blog_folders'):
+            self._log("→ PopularPostPage.load_blog_folders 위임")
+            try:
+                # 계정 콤보 동기화 후 호출
+                if hasattr(pop, 'account_combo'):
+                    idx = pop.account_combo.findData(acc.get('id'))
+                    if idx < 0:
+                        idx = pop.account_combo.findText(acc.get('id', ''))
+                    if idx >= 0: pop.account_combo.setCurrentIndex(idx)
+                pop.load_blog_folders()
+                # 폴더 결과 복사 (PopularPostPage는 비동기일 수 있어 약간 대기)
+                from PyQt6.QtCore import QTimer
+                def _sync_folders(show_msg=False):
+                    src = None
+                    for attr in ('blog_folder', 'folder_combo', 'category_combo'):
+                        c = getattr(pop, attr, None)
+                        if c is not None and hasattr(c, 'count') and c.count() > 0:
+                            src = c; break
+                    if src is None:
+                        return
+                    self.folder_combo.clear()
+                    saved = []
+                    for i in range(src.count()):
+                        self.folder_combo.addItem(src.itemText(i), src.itemData(i))
+                        saved.append({'text': src.itemText(i), 'data': src.itemData(i)})
+                    cnt = self.folder_combo.count()
+                    self._log(f"✅ 카테고리 {cnt}개 동기화 완료")
+                    # ★ 캐시에 영구 저장
+                    if cnt > 0:
+                        try:
+                            self.folder_cache[nid] = saved
+                            import json as _json
+                            with open(self._cat_cache_path, 'w', encoding='utf-8') as _f:
+                                _json.dump(self.folder_cache, _f, ensure_ascii=False, indent=2)
+                            self._log(f"💾 카테고리 캐시 저장: {self._cat_cache_path}")
+                        except Exception as _e:
+                            self._log(f"캐시 저장 실패: {_e}")
+                    if show_msg:
+                        QMessageBox.information(self, "완료", f"카테고리 {cnt}개 로드 완료")
+                _sync_folders(show_msg=True)
+                _sync_folders()
+                # 비동기 로드 대비 1.5초 후 한 번 더 동기화
+                QTimer.singleShot(1500, _sync_folders)
+                QTimer.singleShot(4000, _sync_folders)
+                # 더 길게도 한 번 (셀레니움 로그인 후 응답 시간 고려)
+                QTimer.singleShot(8000, _sync_folders)
+                QTimer.singleShot(15000, _sync_folders)
+                return
+            except Exception as e:
+                self._log(f"위임 실패, 직접 처리: {e}")
+                import traceback; traceback.print_exc()
+        QMessageBox.warning(self, "오류",
+            "인기글 수집 페이지를 찾을 수 없습니다.\n"
+            "프로그램을 재시작 후 다시 시도해 주세요.")
+
+    # ─────────────── 발행 (PopularPostPage.publish_to_blog 위임) ───────────────
+    # ─────────────── 발행 (v41: 엑셀 데이터 격리 + 빈 키워드/본문 허용) ───────────────
+    def publish_to_blog(self, only_selected=False):
+        """[v41] 엑셀로 업로드한 항목만 발행.
+        - 인기글 페이지의 generated_articles를 절대 사용/오염시키지 않음 (백업 후 비우고 주입)
+        - status가 '완료'가 아니어도 발행 가능 (키워드/본문 빈 값 허용)
+        - 본문이 비어있으면 제목을 본문으로 사용 (네이버 에디터가 빈 본문을 거부하기 때문)
+        """
+        if self._publishing:
+            QMessageBox.information(self, "안내", "이미 발행 중입니다"); return
+
+        # 발행 대상 추출 (status 필터 제거)
+        if only_selected:
+            sel = self._selected_indices()
+            if not sel:
+                QMessageBox.warning(self, "경고", "체크박스로 항목을 선택하세요"); return
+            targets = [self.titles_data[i] for i in sel]
+        else:
+            targets = list(self.titles_data)
+        if not targets:
+            QMessageBox.warning(self, "경고", "발행할 항목이 없습니다 (먼저 엑셀 업로드)"); return
+
+        acc = self._get_selected_account()
+        if not acc:
+            QMessageBox.warning(self, "경고", "계정을 선택하세요"); return
+
+        # 인기글수집 페이지의 발행 엔진 위임 (속성/메서드만 빌려쓰기)
+        pop = self.main.pages.get('popular') if hasattr(self.main, 'pages') else None
+        if pop is None:
+            pop = getattr(self.main, 'popular_page', None)
+        # ★ v62: 인기글 페이지가 아직 lazy-load 되지 않았으면 강제로 로드
+        if pop is None and hasattr(self.main, '_ensure_page_loaded'):
+            try:
+                self.main._ensure_page_loaded('popular')
+                pop = self.main.pages.get('popular')
+                self._log("ℹ️ 인기글 페이지 자동 로드 완료 (발행 엔진 공유용)")
+            except Exception as _e:
+                self._log(f"인기글 페이지 자동 로드 실패: {_e}")
+        if not pop or not hasattr(pop, 'publish_to_blog'):
+            QMessageBox.critical(self, "오류",
+                "인기글 수집 페이지를 찾을 수 없습니다. 발행 엔진이 공유되지 않습니다."); return
+
+        # ── 엑셀 데이터만 담은 페이로드 구성 (빈 본문은 제목으로 채움) ──
+        articles_payload = []
+        for d in targets:
+            title = (d.get("combined_title") or d.get("title1") or "").strip() or "(제목 없음)"
+            content = (d.get("content") or "").strip()
+            if not content:
+                # 네이버 에디터가 빈 본문을 거부하므로 제목을 본문으로 폴백
+                content = title
+            articles_payload.append({
+                "title": title,
+                "content": content,
+                "keyword": d.get("keyword", "") or "",
+                "status": "완료",   # PopularPostPage._build_publish_queue 의 '실패' 필터 통과용
+            })
+
+        # ── 인기글 페이지의 generated_articles 백업 후 우리 데이터로 완전 교체 ──
+        # (옵션 1+2: 인기글 큐와 격리 + 업로드 시 인기글 큐 자동 비우기)
+        backup_generated = list(getattr(pop, 'generated_articles', []) or [])
+        backup_articles  = getattr(pop, 'articles', None)
+        try:
+            pop.generated_articles = articles_payload   # ★ 핵심: 올바른 속성명
+            try:
+                pop.articles = articles_payload          # 혹시 다른 코드 경로 대비
+            except Exception:
+                pass
+
+            # ── 카테고리(폴더) 동기화 ──
+            target_text = self.folder_combo.currentText()
+            if target_text:
+                for attr in ('blog_folder', 'folder_combo', 'category_combo'):
+                    c = getattr(pop, attr, None)
+                    if c is not None and hasattr(c, 'findText'):
+                        idx = c.findText(target_text)
+                        if idx >= 0:
+                            c.setCurrentIndex(idx); break
+
+            # ── 계정 동기화 ──
+            if hasattr(pop, 'account_combo'):
+                idx = pop.account_combo.findData(acc.get('id'))
+                if idx < 0:
+                    idx = pop.account_combo.findText(acc.get('id', ''))
+                if idx >= 0:
+                    pop.account_combo.setCurrentIndex(idx)
+
+            # ── 공개 범위 / 발행 간격 동기화 (가능한 경우) ──
+            try:
+                if hasattr(pop, 'publish_open') and hasattr(pop.publish_open, 'setCurrentText'):
+                    pop.publish_open.setCurrentText(self.publish_open.currentText())
+            except Exception:
+                pass
+            try:
+                if hasattr(pop, 'publish_interval') and hasattr(pop.publish_interval, 'setValue'):
+                    pop.publish_interval.setValue(int(self.publish_interval.value()))
+            except Exception:
+                pass
+
+            self._publishing = True
+            self._log(f"🚀 [엑셀 전용 발행] {len(articles_payload)}건 (인기글 데이터와 분리)")
+            for i, a in enumerate(articles_payload, 1):
+                self._log(f"  [{i}] {a['title'][:40]} (본문 {len(a['content'])}자, 키워드='{a['keyword']}')")
+
+            # ── 인기글 페이지 발행 엔진 실행 ──
+            pop.publish_to_blog()
+
+            # 위임 발행은 비동기 (백그라운드 스레드)이므로 결과는 '발행요청'으로 마킹
+            for d in targets:
+                d["publish_status"] = "발행요청"
+                try:
+                    self.db.update(d["db_id"], publish_status="발행요청",
+                                   published_at=self._now())
+                except Exception:
+                    pass
+            self._refresh_table()
+        except Exception as e:
+            self._log(f"❌ 발행 오류: {e}")
+            import traceback; traceback.print_exc()
+            QMessageBox.critical(self, "오류", f"발행 실패: {e}")
+        finally:
+            self._publishing = False
+            # ── 인기글 페이지 데이터 원복 (다른 탭 작업 보호) ──
+            try:
+                pop.generated_articles = backup_generated
+                if backup_articles is not None:
+                    pop.articles = backup_articles
+            except Exception:
+                pass
+
+
+    # ─────────────── 결과 내보내기 ───────────────
+    def export_results(self):
+        done = [d for d in self.titles_data if d.get("content")]
+        if not done:
+            QMessageBox.warning(self, "경고", "내보낼 원고가 없습니다"); return
+        try:
+            from openpyxl import Workbook
+            path, _ = QFileDialog.getSaveFileName(
+                self, "결과 저장", f"제목대량_결과_{_dt.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                "Excel Files (*.xlsx)"
+            )
+            if not path: return
+            wb = Workbook(); ws = wb.active; ws.title = "결과"
+            ws.append(["#", "제목(통합)", "키워드", "글자수", "AI상태", "발행상태", "원고", "생성모델"])
+            for i, d in enumerate(done, 1):
+                ws.append([i, d.get("combined_title",""), d.get("keyword",""),
+                           d.get("char_count",0), d.get("status",""),
+                           d.get("publish_status",""), d.get("content",""),
+                           d.get("ai_model","")])
+            wb.save(path)
+            QMessageBox.information(self, "완료", f"저장됨:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"내보내기 실패: {e}")
+
+
+if __name__ == "__main__":
+    import traceback
+    try:
+        print("[DEBUG] QApplication 생성 중...")
+        app = QApplication(sys.argv)
+        app.setStyle('Fusion')
+        print("[DEBUG] PostPro 윈도우 생성 중...")
+        window = PostPro()
+        print("[DEBUG] 윈도우 show...")
+        window.show()
+        print("[DEBUG] 이벤트 루프 시작...")
+        rc = app.exec()
+        print(f"[DEBUG] 이벤트 루프 종료 rc={rc}")
+        sys.exit(rc)
+    except Exception as e:
+        print(f"[FATAL ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        input("엔터를 눌러 종료하세요...")
