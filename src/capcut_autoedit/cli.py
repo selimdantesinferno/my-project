@@ -22,7 +22,7 @@ def main() -> None:
 
 @main.command()
 @click.argument("source")
-@click.option("--out", "out_dir", required=True, help="출력할 draft 폴더 경로")
+@click.option("--out", "out_dir", required=True, help="출력 폴더 경로")
 @click.option(
     "--style",
     "subtitle_style",
@@ -31,12 +31,21 @@ def main() -> None:
     show_default=True,
     help="자막 스타일. shorts-ko는 한국어 Shorts 내레이션 어미/구두점 규칙 적용",
 )
-def draft(source: str, out_dir: str, subtitle_style: str) -> None:
-    """[모드 1] 영상을 CapCut 편집 가능 프로젝트(draft 폴더)로 변환한다.
+@click.option(
+    "--fast",
+    is_flag=True,
+    default=False,
+    help="ffmpeg 스트림 카피로 빠르게 자르기(키프레임에 스냅됨). 기본은 정밀 재인코딩",
+)
+def draft(source: str, out_dir: str, subtitle_style: str, fast: bool) -> None:
+    """[모드 1] 영상에서 컷 클립 + SRT 자막 번들을 생성한다.
 
     SOURCE 는 로컬 영상 파일 경로 또는 유튜브 링크.
+    결과 폴더의 clip_*.mp4 와 subtitles.srt 를 CapCut 등 편집기로 드래그해 사용.
     """
-    out = draft_mode.run(source, out_dir, subtitle_style=subtitle_style)
+    out = draft_mode.run(
+        source, out_dir, subtitle_style=subtitle_style, fast=fast
+    )
     click.echo(f"완료: {out}")
 
 
