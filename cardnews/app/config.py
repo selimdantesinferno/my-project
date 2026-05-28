@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     youtube_client_secret: str = ""
     youtube_refresh_token: str = ""
 
+    # TikTok Content Posting API
+    tiktok_access_token: str = ""
+
     @property
     def base_url(self) -> str:
         return self.public_base_url.rstrip("/")

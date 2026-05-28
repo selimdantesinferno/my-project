@@ -139,9 +139,86 @@ async def upload_youtube(video_url: str, title: str, description: str,
         _youtube_upload_sync, content, title, description, privacy)
 
 
-# ---------- TikTok (미연동) ----------
-async def upload_tiktok(*_args, **_kwargs) -> dict:
-    raise UploadError("TikTok 은 아직 연동되지 않았습니다. (추후 TikTok Content Posting API 지원 예정)")
+# ---------- TikTok ----------
+TIKTOK_API = "https://open.tiktokapis.com/v2"
+
+# 우리 privacy 표기 → TikTok privacy_level
+_TIKTOK_PRIVACY = {
+    "public": "PUBLIC_TO_EVERYONE",
+    "unlisted": "MUTUAL_FOLLOW_FRIENDS",
+    "private": "SELF_ONLY",
+}
+
+# TikTok 청크 규칙: 5MB ~ 64MB
+_MIN_CHUNK = 5 * 1024 * 1024
+_MAX_CHUNK = 64 * 1024 * 1024
+
+
+def _tiktok_chunking(size: int) -> tuple[int, int]:
+    """(chunk_size, total_chunk_count) 계산."""
+    if size <= _MAX_CHUNK:
+        return size, 1
+    chunk = _MAX_CHUNK
+    count = -(-size // chunk)  # ceil
+    return chunk, count
+
+
+async def upload_tiktok(video_url: str, title: str, description: str = "",
+                        privacy: str = "private") -> dict:
+    """TikTok Content Posting API 로 영상 직접 게시 (FILE_UPLOAD 방식)."""
+    if not settings.tiktok_access_token:
+        raise UploadError("TikTok 자격정보(TIKTOK_ACCESS_TOKEN)가 없습니다.")
+    token = settings.tiktok_access_token
+    headers = {"Authorization": f"Bearer {token}",
+               "Content-Type": "application/json; charset=UTF-8"}
+
+    content, ctype = await drive.download(video_url)
+    size = len(content)
+    chunk_size, total_chunks = _tiktok_chunking(size)
+    privacy_level = _TIKTOK_PRIVACY.get(privacy, "SELF_ONLY")
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        # 1) 업로드 초기화
+        init = await client.post(
+            f"{TIKTOK_API}/post/publish/video/init/", headers=headers,
+            json={
+                "post_info": {
+                    "title": (title or description or "")[:150],
+                    "privacy_level": privacy_level,
+                    "disable_comment": False,
+                    "disable_duet": False,
+                    "disable_stitch": False,
+                },
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": size,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": total_chunks,
+                },
+            },
+        )
+        idata = init.json()
+        if idata.get("error", {}).get("code") not in (None, "ok"):
+            raise UploadError(f"TikTok init 실패: {idata['error']}")
+        publish_id = idata["data"]["publish_id"]
+        upload_url = idata["data"]["upload_url"]
+
+        # 2) 청크 업로드 (PUT)
+        mime = ctype if ctype.startswith("video/") else "video/mp4"
+        for i in range(total_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, size) - 1
+            part = content[start:end + 1]
+            put = await client.put(upload_url, content=part, headers={
+                "Content-Type": mime,
+                "Content-Length": str(len(part)),
+                "Content-Range": f"bytes {start}-{end}/{size}",
+            })
+            if put.status_code not in (200, 201, 206):
+                raise UploadError(f"TikTok 청크 업로드 실패: {put.status_code} {put.text}")
+
+    return {"platform": "tiktok", "id": publish_id, "privacy": privacy_level,
+            "note": "비공개(SELF_ONLY)일 수 있음 — 앱 심사 전에는 공개 게시 제한"}
 
 
 # ---------- 통합 ----------
@@ -163,5 +240,6 @@ async def upload_video(*, targets: list[str], video_url: str, title: str = "",
             results.append(await upload_youtube(
                 video_url, ov.get("title", title), desc, ov.get("privacy", privacy)))
         elif t == "tiktok":
-            results.append(await upload_tiktok())
+            results.append(await upload_tiktok(
+                video_url, ov.get("title", title), desc, ov.get("privacy", privacy)))
     return results

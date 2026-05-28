@@ -64,7 +64,7 @@ python cli.py --url https://example.com --upload instagram threads
 ## 주요 기능
 
 - **카드뉴스 자동 생성·발행** — 링크/본문 → AI 슬라이드 → 인스타·스레드 캐러셀
-- **영상 업로드** — 구글 드라이브 영상 → 유튜브 / 인스타 릴스 / 스레드 동영상 (틱톡은 미연동)
+- **영상 업로드** — 구글 드라이브 영상 → 유튜브 / 인스타 릴스 / 스레드 동영상 / 틱톡
 - **즉시 발행** — 생성 후 선택한 플랫폼에 바로 업로드
 - **고정(첫) 댓글** — 발행 직후 첫 댓글 자동 등록 (예: "프로필 링크 확인")
 - **예약 발행** — 날짜·시간 지정(설정 시간대 기준), 백그라운드 스케줄러가 발행
@@ -78,7 +78,9 @@ python cli.py --url https://example.com --upload instagram threads
 
 - **인스타 릴스 / 스레드 동영상**: 드라이브 링크를 직접 다운로드 URL로 변환해 전달, 인코딩 완료까지 폴링 후 발행
 - **유튜브**: Data API v3로 파일을 내려받아 업로드 (OAuth2 — `YOUTUBE_CLIENT_ID/SECRET/REFRESH_TOKEN` 필요)
-- **틱톡**: 현재 미연동 (선택 시 안내 메시지 반환, 추후 TikTok Content Posting API 지원 예정)
+- **틱톡**: Content Posting API (FILE_UPLOAD, 도메인 인증 불필요). ⚠️ 앱 심사 전에는 비공개(SELF_ONLY)로만 게시됨
+
+> **실제 발행 설정은 [GUIDE.md](GUIDE.md)** 에 토큰 발급·ngrok·드라이브 공유까지 단계별로 정리되어 있습니다.
 
 영상 대량 업로드 열: `type, video_url, title, description, targets, first_comment, privacy, scheduled_at`
 (`type=video` 또는 `video_url` 이 있으면 영상 잡으로 등록. 양식: `GET /api/bulk/sample?kind=video`)

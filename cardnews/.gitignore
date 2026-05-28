@@ -8,3 +8,4 @@ __pycache__/
 # 단, 디렉터리는 유지
 !output/.gitkeep
 !data/.gitkeep
+scripts/client_secret.json
