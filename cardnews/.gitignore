@@ -1,0 +1,8 @@
+.env
+output/*.png
+__pycache__/
+*.pyc
+.venv/
+
+# 단, 디렉터리는 유지
+!output/.gitkeep

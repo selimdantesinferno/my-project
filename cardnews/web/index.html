@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>카드뉴스 자동화 공장</title>
+<style>
+  :root { --bg:#0f1117; --card:#1a1d27; --line:#2a2e3a; --fg:#e8eaf0; --sub:#8b90a0; --accent:#409cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:24px 32px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--sub); font-size:13px; }
+  .wrap { display:grid; grid-template-columns:380px 1fr; gap:0; min-height:calc(100vh - 73px); }
+  .panel { padding:24px 32px; }
+  .panel.left { border-right:1px solid var(--line); }
+  label { display:block; font-size:13px; color:var(--sub); margin:16px 0 6px; }
+  textarea, input, select { width:100%; background:var(--card); border:1px solid var(--line);
+         color:var(--fg); border-radius:10px; padding:10px 12px; font-size:14px; font-family:inherit; }
+  textarea { resize:vertical; }
+  .row { display:flex; gap:12px; }
+  .row > div { flex:1; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:10px;
+         padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer; width:100%; margin-top:20px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.sec { background:var(--card); border:1px solid var(--line); }
+  .slides { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+  .slides img { width:100%; border-radius:12px; border:1px solid var(--line); }
+  .meta-box { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:20px; }
+  .tags { color:var(--accent); font-size:13px; }
+  .upload-row { display:flex; gap:16px; align-items:center; margin-top:8px; }
+  .upload-row label { margin:0; color:var(--fg); display:flex; align-items:center; gap:6px; }
+  .status { font-size:13px; margin-top:12px; white-space:pre-wrap; }
+  .status.err { color:#ff6b6b; }
+  .status.ok { color:#51cf66; }
+  .empty { color:var(--sub); text-align:center; margin-top:80px; }
+  .hint { font-size:12px; color:var(--sub); margin-top:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏭 카드뉴스 자동화 공장</h1>
+  <p>링크·본문 입력 → AI가 슬라이드 생성 → 인스타그램·스레드 캐러셀 자동 업로드</p>
+</header>
+
+<div class="wrap">
+  <!-- 입력 패널 -->
+  <div class="panel left">
+    <label>링크 (선택)</label>
+    <input id="url" placeholder="https://... 글감으로 쓸 페이지 주소" />
+
+    <label>본문 / 글감</label>
+    <textarea id="source" rows="7" placeholder="유튜브 스크립트, 뉴스 기사 등 글감을 붙여넣으세요. 링크만 넣어도 됩니다."></textarea>
+
+    <div class="row">
+      <div>
+        <label>템플릿</label>
+        <select id="template"></select>
+      </div>
+      <div>
+        <label>색상 톤</label>
+        <select id="tone"></select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>슬라이드 수</label>
+        <input id="slide_count" type="number" value="7" min="2" max="12" />
+      </div>
+      <div>
+        <label>AI 제공자</label>
+        <select id="provider"></select>
+      </div>
+    </div>
+
+    <label>계정명 (카드 하단 표기)</label>
+    <input id="account" placeholder="@my_account" />
+
+    <label>프롬프트 (비우면 기본 프롬프트 사용)</label>
+    <textarea id="prompt" rows="3"></textarea>
+    <div class="hint" id="prompt-hint"></div>
+
+    <button id="gen-btn">✨ 글쓰기 시작 (카드뉴스 생성)</button>
+    <div class="status" id="gen-status"></div>
+  </div>
+
+  <!-- 결과 패널 -->
+  <div class="panel right">
+    <div id="empty" class="empty">왼쪽에서 글감을 입력하고 생성하면<br />여기에 카드뉴스 미리보기가 나타납니다.</div>
+
+    <div id="result" style="display:none">
+      <div class="meta-box">
+        <label style="margin-top:0">게시물 캡션</label>
+        <textarea id="caption" rows="3"></textarea>
+        <div class="tags" id="hashtags"></div>
+      </div>
+
+      <div class="slides" id="slides"></div>
+
+      <div class="meta-box" style="margin-top:20px">
+        <label style="margin-top:0">업로드</label>
+        <div class="upload-row">
+          <label><input type="checkbox" id="ig" checked /> 인스타그램</label>
+          <label><input type="checkbox" id="th" checked /> 스레드</label>
+        </div>
+        <button id="up-btn" class="sec">🚀 선택한 플랫폼에 업로드</button>
+        <div class="status" id="up-status"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let current = null; // {images, caption, hashtags}
+
+async function loadOptions() {
+  const r = await fetch('/api/options'); const o = await r.json();
+  const tpl = document.getElementById('template');
+  o.templates.forEach(t => tpl.add(new Option(t.label, t.value)));
+  tpl.value = 'toss';
+  const tone = document.getElementById('tone');
+  o.tones.forEach(t => tone.add(new Option(t, t)));
+  const prov = document.getElementById('provider');
+  o.providers.forEach(p => prov.add(new Option(p, p)));
+  prov.value = o.default_provider;
+  document.getElementById('prompt-hint').textContent = '기본: ' + o.default_prompt;
+}
+
+document.getElementById('gen-btn').onclick = async () => {
+  const btn = document.getElementById('gen-btn');
+  const st = document.getElementById('gen-status');
+  st.className = 'status'; st.textContent = '⏳ AI가 카드뉴스를 만드는 중...';
+  btn.disabled = true;
+  try {
+    const body = {
+      source_text: document.getElementById('source').value,
+      url: document.getElementById('url').value,
+      slide_count: parseInt(document.getElementById('slide_count').value),
+      template: document.getElementById('template').value,
+      tone: document.getElementById('tone').value,
+      account: document.getElementById('account').value,
+      prompt: document.getElementById('prompt').value,
+      provider: document.getElementById('provider').value,
+    };
+    const r = await fetch('/api/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '생성 실패');
+    current = { images:d.images, caption:d.caption, hashtags:d.hashtags };
+    document.getElementById('empty').style.display = 'none';
+    document.getElementById('result').style.display = 'block';
+    document.getElementById('caption').value = d.caption;
+    document.getElementById('hashtags').textContent = d.hashtags.join('  ');
+    const wrap = document.getElementById('slides'); wrap.innerHTML = '';
+    d.image_urls.forEach(u => { const i = new Image(); i.src = u; wrap.appendChild(i); });
+    st.className = 'status ok'; st.textContent = '✅ ' + d.images.length + '장 생성 완료!';
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  } finally { btn.disabled = false; }
+};
+
+document.getElementById('up-btn').onclick = async () => {
+  if (!current) return;
+  const targets = [];
+  if (document.getElementById('ig').checked) targets.push('instagram');
+  if (document.getElementById('th').checked) targets.push('threads');
+  const st = document.getElementById('up-status');
+  st.className = 'status'; st.textContent = '⏳ 업로드 중...';
+  try {
+    const r = await fetch('/api/upload', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        targets, images: current.images,
+        caption: document.getElementById('caption').value,
+        hashtags: current.hashtags,
+      })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '업로드 실패');
+    st.className = 'status ok';
+    st.textContent = '✅ 업로드 완료\n' + d.results.map(x => `${x.platform}: ${x.id}`).join('\n');
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  }
+};
+
+loadOptions();
+</script>
+</body>
+</html>
