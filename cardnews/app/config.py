@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # 서버 공개 주소 (Meta API가 이미지를 가져갈 URL)
     public_base_url: str = "http://localhost:8000"
 
+    # 예약 시각 입력의 기준 시간대 (naive 시각 해석용)
+    timezone: str = "Asia/Seoul"
+
     # Threads
     threads_user_id: str = ""
     threads_access_token: str = ""

@@ -61,6 +61,21 @@ python cli.py --url https://example.com --upload instagram threads
 - 색상 톤: `blue`, `light`, `dark`, `warm`
 - 통계 숫자는 자동으로 강조(stat) 슬라이드로 구성됩니다.
 
+## 주요 기능
+
+- **즉시 발행** — 생성 후 선택한 플랫폼에 바로 업로드
+- **고정(첫) 댓글** — 발행 직후 첫 댓글 자동 등록 (예: "프로필 링크 확인")
+- **예약 발행** — 날짜·시간 지정(설정 시간대 기준), 백그라운드 스케줄러가 발행
+- **엑셀/CSV 대량 업로드** — 행마다 글감→생성→예약 등록 (샘플 양식 다운로드 제공)
+
+### 대량 업로드 양식 (열)
+
+`url, text, slide_count, template, tone, account, prompt, targets, first_comment, scheduled_at, provider`
+
+- `targets`: `instagram,threads` 처럼 콤마 구분
+- `scheduled_at`: `YYYY-MM-DD HH:MM` (`TIMEZONE` 기준). 비우면 즉시 발행
+- 웹 UI의 "샘플 양식" 버튼 또는 `GET /api/bulk/sample` 로 양식 받기
+
 ## API
 
 | 메서드 | 경로 | 설명 |
@@ -68,5 +83,10 @@ python cli.py --url https://example.com --upload instagram threads
 | GET | `/` | 웹 UI |
 | GET | `/api/options` | 템플릿/톤/제공자 목록 |
 | POST | `/api/generate` | 글감 → 슬라이드 생성·렌더 |
-| POST | `/api/upload` | 인스타/스레드 업로드 |
+| POST | `/api/upload` | 즉시 발행 (고정 댓글 포함) |
+| POST | `/api/schedule` | 예약 발행 잡 등록 |
+| GET | `/api/jobs` | 예약 잡 목록 |
+| POST | `/api/jobs/{id}/cancel` | 예약 취소 |
+| POST | `/api/bulk` | 엑셀/CSV 대량 등록 |
+| GET | `/api/bulk/sample` | 대량 업로드 샘플 CSV |
 | GET | `/output/<file>` | 생성된 이미지 (공개 제공) |

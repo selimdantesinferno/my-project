@@ -84,6 +84,16 @@
 
     <button id="gen-btn">✨ 글쓰기 시작 (카드뉴스 생성)</button>
     <div class="status" id="gen-status"></div>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:28px 0" />
+    <label style="margin-top:0">📊 엑셀/CSV 대량 업로드 (최대 다수)</label>
+    <div class="hint">행마다 글감→생성→예약 잡 등록. 예약시각 비우면 즉시 발행.</div>
+    <input id="bulk-file" type="file" accept=".csv,.xlsx" style="margin-top:8px" />
+    <div class="row" style="margin-top:8px">
+      <button id="bulk-btn" class="sec" style="margin-top:0">⬆️ 대량 등록</button>
+      <button id="sample-btn" class="sec" style="margin-top:0">📥 샘플 양식</button>
+    </div>
+    <div class="status" id="bulk-status"></div>
   </div>
 
   <!-- 결과 패널 -->
@@ -105,8 +115,22 @@
           <label><input type="checkbox" id="ig" checked /> 인스타그램</label>
           <label><input type="checkbox" id="th" checked /> 스레드</label>
         </div>
-        <button id="up-btn" class="sec">🚀 선택한 플랫폼에 업로드</button>
+        <label>고정(첫) 댓글</label>
+        <input id="first_comment" placeholder="예: 프로필 링크를 확인해 주세요" />
+        <label>예약 발행 시각 (비우면 즉시 발행)</label>
+        <input id="scheduled_at" type="datetime-local" />
+        <div class="row">
+          <button id="up-btn" style="margin-top:12px">🚀 즉시 발행</button>
+          <button id="sched-btn" class="sec" style="margin-top:12px">⏰ 예약 등록</button>
+        </div>
         <div class="status" id="up-status"></div>
+      </div>
+
+      <div class="meta-box">
+        <label style="margin-top:0">📅 예약 목록 <span id="jobs-count" class="hint"></span>
+          <button id="refresh-btn" class="sec" style="width:auto;padding:4px 10px;margin:0 0 0 8px;font-size:12px">새로고침</button>
+        </label>
+        <div id="jobs"></div>
       </div>
     </div>
   </div>
@@ -162,20 +186,25 @@ document.getElementById('gen-btn').onclick = async () => {
   } finally { btn.disabled = false; }
 };
 
+function pickTargets() {
+  const t = [];
+  if (document.getElementById('ig').checked) t.push('instagram');
+  if (document.getElementById('th').checked) t.push('threads');
+  return t;
+}
+
 document.getElementById('up-btn').onclick = async () => {
   if (!current) return;
-  const targets = [];
-  if (document.getElementById('ig').checked) targets.push('instagram');
-  if (document.getElementById('th').checked) targets.push('threads');
   const st = document.getElementById('up-status');
   st.className = 'status'; st.textContent = '⏳ 업로드 중...';
   try {
     const r = await fetch('/api/upload', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        targets, images: current.images,
+        targets: pickTargets(), images: current.images,
         caption: document.getElementById('caption').value,
         hashtags: current.hashtags,
+        first_comment: document.getElementById('first_comment').value,
       })
     });
     const d = await r.json();
@@ -187,7 +216,76 @@ document.getElementById('up-btn').onclick = async () => {
   }
 };
 
+document.getElementById('sched-btn').onclick = async () => {
+  if (!current) return;
+  const st = document.getElementById('up-status');
+  const when = document.getElementById('scheduled_at').value.replace('T', ' ');
+  st.className = 'status'; st.textContent = '⏳ 예약 등록 중...';
+  try {
+    const r = await fetch('/api/schedule', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        targets: pickTargets(), images: current.images,
+        caption: document.getElementById('caption').value,
+        hashtags: current.hashtags,
+        first_comment: document.getElementById('first_comment').value,
+        scheduled_at: when, label: document.getElementById('account').value,
+      })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '예약 실패');
+    st.className = 'status ok'; st.textContent = '✅ 예약 등록 완료 (' + d.job.id + ')';
+    loadJobs();
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  }
+};
+
+async function loadJobs() {
+  const r = await fetch('/api/jobs'); const d = await r.json();
+  const box = document.getElementById('jobs');
+  document.getElementById('jobs-count').textContent = '(' + d.jobs.length + ')';
+  if (!d.jobs.length) { box.innerHTML = '<div class="hint">예약된 발행이 없습니다.</div>'; return; }
+  const emoji = {scheduled:'🕒', publishing:'⏳', done:'✅', failed:'❌', canceled:'🚫'};
+  box.innerHTML = d.jobs.map(j => {
+    const t = new Date(j.scheduled_at).toLocaleString('ko-KR');
+    const cancel = j.status === 'scheduled'
+      ? ` <a href="#" onclick="cancelJob('${j.id}');return false" style="color:#ff6b6b">취소</a>` : '';
+    const err = j.error ? ` <span style="color:#ff6b6b">${j.error}</span>` : '';
+    return `<div class="hint" style="margin:6px 0">${emoji[j.status]||''} ${t} · ${j.targets.join('+')} · ${j.label||''} <b>[${j.status}]</b>${cancel}${err}</div>`;
+  }).join('');
+}
+
+async function cancelJob(id) {
+  await fetch('/api/jobs/' + id + '/cancel', {method:'POST'});
+  loadJobs();
+}
+
+document.getElementById('refresh-btn').onclick = loadJobs;
+document.getElementById('sample-btn').onclick = () => { window.location = '/api/bulk/sample'; };
+
+document.getElementById('bulk-btn').onclick = async () => {
+  const f = document.getElementById('bulk-file').files[0];
+  const st = document.getElementById('bulk-status');
+  if (!f) { st.className = 'status err'; st.textContent = '❌ 파일을 선택하세요.'; return; }
+  st.className = 'status'; st.textContent = '⏳ 대량 처리 중... (행마다 AI 생성/렌더)';
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const r = await fetch('/api/bulk', {method:'POST', body:fd});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '실패');
+    const fails = d.results.filter(x => !x.ok);
+    st.className = fails.length ? 'status' : 'status ok';
+    st.textContent = `✅ ${d.created}/${d.total}건 등록`
+      + (fails.length ? '\n실패: ' + fails.map(x => `행${x.row}: ${x.error}`).join('; ') : '');
+    loadJobs();
+  } catch (e) {
+    st.className = 'status err'; st.textContent = '❌ ' + e.message;
+  }
+};
+
 loadOptions();
+loadJobs();
 </script>
 </body>
 </html>

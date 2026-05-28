@@ -38,7 +38,8 @@ async def _post(client: httpx.AsyncClient, url: str, params: dict) -> dict:
 
 
 # ---------- Instagram ----------
-async def upload_instagram(filenames: list[str], caption: str) -> dict:
+async def upload_instagram(filenames: list[str], caption: str,
+                           first_comment: str = "") -> dict:
     if not (settings.ig_user_id and settings.ig_access_token):
         raise UploadError("Instagram 자격정보(IG_USER_ID/IG_ACCESS_TOKEN)가 없습니다.")
     token = settings.ig_access_token
@@ -69,11 +70,24 @@ async def upload_instagram(filenames: list[str], caption: str) -> dict:
             "creation_id": container["id"],
             "access_token": token,
         })
-    return {"platform": "instagram", "id": result.get("id"), "children": child_ids}
+        media_id = result.get("id")
+
+        # 4) 고정(첫) 댓글
+        comment_id = None
+        if first_comment and media_id:
+            c = await _post(client, f"{GRAPH}/{media_id}/comments", {
+                "message": first_comment,
+                "access_token": token,
+            })
+            comment_id = c.get("id")
+
+    return {"platform": "instagram", "id": media_id,
+            "children": child_ids, "comment_id": comment_id}
 
 
 # ---------- Threads ----------
-async def upload_threads(filenames: list[str], text: str) -> dict:
+async def upload_threads(filenames: list[str], text: str,
+                         first_comment: str = "") -> dict:
     if not (settings.threads_user_id and settings.threads_access_token):
         raise UploadError("Threads 자격정보(THREADS_USER_ID/THREADS_ACCESS_TOKEN)가 없습니다.")
     token = settings.threads_access_token
@@ -104,18 +118,37 @@ async def upload_threads(filenames: list[str], text: str) -> dict:
             "creation_id": container["id"],
             "access_token": token,
         })
-    return {"platform": "threads", "id": result.get("id"), "children": child_ids}
+        thread_id = result.get("id")
+
+        # 고정(첫) 댓글 = 본인 글에 대한 답글
+        comment_id = None
+        if first_comment and thread_id:
+            reply_c = await _post(client, f"{THREADS}/{uid}/threads", {
+                "media_type": "TEXT",
+                "text": first_comment,
+                "reply_to_id": thread_id,
+                "access_token": token,
+            })
+            await asyncio.sleep(2)
+            rp = await _post(client, f"{THREADS}/{uid}/threads_publish", {
+                "creation_id": reply_c["id"],
+                "access_token": token,
+            })
+            comment_id = rp.get("id")
+
+    return {"platform": "threads", "id": thread_id,
+            "children": child_ids, "comment_id": comment_id}
 
 
-async def upload(targets: list[str], filenames: list[str],
-                 caption: str, hashtags: list[str]) -> list[dict]:
+async def upload(targets: list[str], filenames: list[str], caption: str,
+                 hashtags: list[str], first_comment: str = "") -> list[dict]:
     """대상 플랫폼들에 업로드. targets: ['instagram','threads'] 중 일부."""
     tag_str = " ".join(hashtags)
     full_caption = f"{caption}\n\n{tag_str}".strip()
     results = []
     for t in targets:
         if t == "instagram":
-            results.append(await upload_instagram(filenames, full_caption))
+            results.append(await upload_instagram(filenames, full_caption, first_comment))
         elif t == "threads":
-            results.append(await upload_threads(filenames, full_caption))
+            results.append(await upload_threads(filenames, full_caption, first_comment))
     return results
