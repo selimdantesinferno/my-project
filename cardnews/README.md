@@ -22,6 +22,17 @@ pip install -r requirements.txt
 cp .env.example .env   # 키 입력
 ```
 
+## 윈도우 사용자 (더블클릭 실행)
+
+코드를 몰라도 됩니다. `cardnews` 폴더에서:
+
+1. **`setup_windows.bat`** 더블클릭 → 최초 설치 (한 번만)
+2. `.env` 파일을 메모장으로 열어 API 키/토큰 입력 (→ `GUIDE.md` 참고)
+3. **`run_windows.bat`** 더블클릭 → 서버 실행 + 브라우저 자동 열림
+
+> 사전에 [python.org](https://www.python.org/downloads/)에서 Python 3.11+ 설치 필요.
+> 설치 화면에서 **"Add Python to PATH"** 체크 필수!
+
 ## 실행 (웹)
 
 ```bash
