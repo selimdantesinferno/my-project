@@ -65,3 +65,18 @@ class EditPlan:
     def total_timeline_us(self) -> int:
         """컷들을 이어붙였을 때의 최종 타임라인 길이."""
         return sum(c.duration_us for c in self.cuts)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EditPlan":
+        """edit_plan.json 등으로 직렬화된 dict 를 EditPlan 으로 복원."""
+        return cls(
+            source_path=data["source_path"],
+            width=int(data["width"]),
+            height=int(data["height"]),
+            fps=float(data["fps"]),
+            duration_us=int(data["duration_us"]),
+            cuts=[Cut(int(c["source_start_us"]), int(c["source_end_us"]))
+                  for c in data.get("cuts", [])],
+            subtitles=[Subtitle(int(s["start_us"]), int(s["end_us"]), s["text"])
+                       for s in data.get("subtitles", [])],
+        )
