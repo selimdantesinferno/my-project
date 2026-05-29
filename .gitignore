@@ -15,3 +15,5 @@ dist/
 *.webm
 /out/
 /downloads/
+# 핸드오프용 로컬 문서 (의도적으로 추적 제외)
+HANDOFF.md
