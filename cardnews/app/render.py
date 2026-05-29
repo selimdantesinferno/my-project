@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import FONTS_DIR, OUTPUT_DIR
+from .fonts import ensure_fonts
 from .templates import Palette, get_palette, get_template
 
 SIZE = 1080  # 인스타/스레드 정사각 권장
@@ -22,6 +23,7 @@ _BLACK = FONTS_DIR / "NotoSansKR-Black.ttf"
 
 
 def _font(path: Path, size: int) -> ImageFont.FreeTypeFont:
+    ensure_fonts()
     return ImageFont.truetype(str(path), size)
 
 

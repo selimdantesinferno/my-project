@@ -22,8 +22,9 @@ call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-echo [3/3] 설정 파일 준비 중...
+echo [3/3] 설정 파일 및 한글 폰트 준비 중...
 if not exist .env copy .env.example .env
+python -m app.fonts
 
 echo.
 echo ============================================
