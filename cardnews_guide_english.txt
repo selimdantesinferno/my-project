@@ -1,0 +1,322 @@
+==============================================================
+  CARD NEWS / SNS AUTO-UPLOAD PROGRAM — FULL ENGLISH SUMMARY
+==============================================================
+(English translation of this conversation's content and guidance)
+
+--------------------------------------------------------------
+0. WHAT WE BUILT
+--------------------------------------------------------------
+A program (in the "cardnews/" folder) that:
+  - Takes a link and/or body text, and uses AI (ChatGPT or Gemini)
+    to generate "card news" carousel slides.
+  - Renders the slides as 1080x1080 PNG images (Korean fonts included),
+    with templates ("toss", "magazine") and color tones.
+  - Auto-uploads carousels to Instagram and Threads.
+  - Also uploads VIDEO files from Google Drive to YouTube,
+    Instagram Reels, Threads video, and TikTok.
+  - Supports: pinned first comment, scheduled publishing, and
+    bulk upload via Excel/CSV.
+
+It is a PYTHON web app:
+  - Engine/backend: Python (FastAPI) does all the work
+    (AI generation, image rendering, scheduling, uploading).
+  - Usage: you open it in a browser at http://localhost:8000
+  - Bonus: there is also a CLI (cli.py) for terminal automation.
+  - It is NOT a desktop .exe app.
+
+Diagram:
+  [You] -> Browser (web UI) --HTTP--> [Python server (FastAPI)]
+                                        |- AI generation (ChatGPT/Gemini)
+                                        |- Image rendering (Pillow)
+                                        |- Scheduler (scheduled publishing)
+                                        |- Meta/YouTube/TikTok upload
+
+--------------------------------------------------------------
+1. PROJECT STRUCTURE
+--------------------------------------------------------------
+cardnews/
+  app/        FastAPI (main) + AI + render + meta/video upload
+              + scheduler + store + bulk + drive
+  web/        Web UI (tabs, preview, scheduled list, bulk upload)
+  scripts/    YouTube OAuth refresh-token helper
+  README.md   Usage + API reference
+  GUIDE.md    Real-publish setup guide (ngrok, tokens, Drive sharing)
+  DEPLOY.md   Cloud deployment guide (run 24/7)
+  setup_windows.bat   First-time install (one click)
+  run_windows.bat     Start the server (one click)
+  start_windows.bat   Menu: choose install / run / deploy
+
+--------------------------------------------------------------
+2. KEY FEATURES
+--------------------------------------------------------------
+- Card-news generation & publishing:
+  link/text -> AI slides -> Pillow render (toss/magazine templates,
+  color tones, Korean fonts) -> Instagram & Threads carousel.
+- Video upload:
+  Google Drive video -> YouTube / Instagram Reels / Threads video / TikTok.
+- Pinned (first) comment: posted automatically right after publishing
+  (a comment on Instagram, a reply on Threads).
+- Scheduled publishing: pick a date/time (timezone-aware, KST input ->
+  stored as UTC); a background scheduler publishes when due.
+- Excel/CSV bulk upload: card-news and video rows can be mixed;
+  per-row error isolation; a sample template is provided.
+- Web UI: Card-news / Video tabs, preview, scheduled-jobs list with cancel.
+
+Templates & colors:
+- Templates: "toss" (lots of whitespace, one bold sentence),
+  "magazine" (label bar, big title).
+- Color tones: blue, light, dark, warm.
+- Statistic numbers are automatically turned into emphasis (stat) slides.
+
+--------------------------------------------------------------
+3. VERIFICATION STATUS (IMPORTANT, HONEST)
+--------------------------------------------------------------
+VERIFIED (actually executed in the build environment):
+  - Korean card rendering (toss/magazine), server boot, all endpoints.
+  - Scheduler, KST->UTC conversion, bulk processing (per-row isolation),
+    Google Drive URL parsing, TikTok chunk calculation.
+  - All modules compile; HTML structure is valid.
+
+NOT VERIFIED (requires credentials, on purpose):
+  - The actual live posting to Instagram/Threads/YouTube/TikTok.
+  - Reasons: (1) no real API tokens/keys were available;
+    (2) the sandbox cannot serve a public URL, which Meta/TikTok need.
+  - The upload code follows the official API flows, but "publish success"
+    must be confirmed on your own machine following GUIDE.md
+    (tokens + ngrok / cloud deployment).
+
+NOTE: TikTok policy only allows PRIVATE (SELF_ONLY) posting before your
+app passes TikTok's audit. Public posting is available after the audit.
+
+--------------------------------------------------------------
+4. WHERE TO RUN IT
+--------------------------------------------------------------
+Option 1 — On your own computer (easiest to start):
+  - Runs while your PC is on; you use it through the browser.
+  - Downside: if your PC is OFF at the scheduled time, the post won't go out.
+
+Option 2 — On a cloud server (for real 24/7 scheduling):
+  - Runs even when your PC is off.
+  - A public https address is created automatically (no ngrok needed).
+  - Beginner-friendly hosts: Railway or Render.
+
+--------------------------------------------------------------
+5. WINDOWS — HOW TO RUN (FROM SCRATCH)
+--------------------------------------------------------------
+Step 0: Install Python (one time)
+  - Go to python.org/downloads -> Download Python.
+  - Run the installer. IMPORTANT: check "Add Python to PATH" at the bottom.
+
+Step 1: Get the code
+  - After merging the PR: green "Code" button -> "Download ZIP" -> unzip.
+  - (Or use git clone if you know git.)
+
+Step 2: Install (one time)
+  - Go into the "cardnews" folder.
+  - Double-click setup_windows.bat (a black window installs everything;
+    takes a few minutes).
+
+Step 3: Enter API keys
+  - Open the ".env" file in the same folder with Notepad and fill in keys.
+  - (Which keys, and where to get them, are in GUIDE.md.)
+
+Step 4: Run
+  - Double-click run_windows.bat -> the browser opens automatically -> use it.
+  - To stop: close the black window. Next time, just double-click run again.
+
+Menu launcher:
+  - Double-click start_windows.bat to get a menu and choose:
+      [1] First-time install   [2] Run the program   [3] Cloud deploy guide
+
+Quick reference table:
+  Situation                         | What to do
+  ----------------------------------|---------------------------------------
+  Very first time                   | Install Python -> setup_windows.bat
+                                    |  -> enter .env keys
+  Every time you start it           | Double-click run_windows.bat
+  Want scheduling even when PC off  | Deploy to the cloud (see DEPLOY.md)
+
+--------------------------------------------------------------
+6. WHAT IS A PR (PULL REQUEST)?
+--------------------------------------------------------------
+A PR is a GitHub request that says: "please merge the work from my
+branch into the main code."
+- Our work currently lives only on the branch
+  "claude/festive-dijkstra-dYATk", not on "master" yet.
+- Creating a PR makes a page where you can review the changed files,
+  and pressing "Merge" merges the code into master.
+- PR #2 was created:
+  https://github.com/selimdantesinferno/my-project/pull/2
+- For personal use, a PR is optional; you can also just use the branch code.
+- (Per your request, the session is no longer watching PR #2.)
+
+--------------------------------------------------------------
+7. REAL-PUBLISH SETUP — ORDER: ngrok, then tokens
+--------------------------------------------------------------
+General rule: paste every token/key ONLY into the .env file (Notepad).
+Never paste tokens into chat, GitHub, or code.
+
+7.1 ngrok — create a "public address" (most important for local use)
+  Instagram/Threads/TikTok fetch your images/videos from a PUBLIC URL.
+  localhost is not visible from outside, so use ngrok for a temporary URL.
+  1) Sign up at ngrok.com, install ngrok, register your authtoken:
+        ngrok config add-authtoken <your_token>
+  2) In a new terminal (app server runs on port 8000):
+        ngrok http 8000
+  3) Copy the "Forwarding https://xxxx.ngrok-free.app" address.
+  4) Put it in .env (no trailing slash):
+        PUBLIC_BASE_URL=https://xxxx.ngrok-free.app
+  Note: a free ngrok URL changes on each restart; update PUBLIC_BASE_URL
+  when it changes. For production, deploy to the cloud with a fixed domain.
+
+--------------------------------------------------------------
+8. TOKEN SETUP — SEQUENTIAL (Instagram -> Threads -> YouTube -> TikTok)
+--------------------------------------------------------------
+
+(1) INSTAGRAM (do this first)
+  Prerequisite: switch your Instagram account to PROFESSIONAL
+  (Business/Creator) and connect it to a Facebook Page.
+  (Instagram app -> Settings -> Account type -> connect Facebook Page)
+  1. Go to developers.facebook.com -> top right "My Apps" -> "Create App".
+  2. Choose type "Business", name it, create.
+  3. Left menu -> add product -> "Instagram".
+  4. Top tools menu -> open "Graph API Explorer".
+  5. Add permissions: instagram_basic, instagram_content_publish,
+     pages_show_list, pages_read_engagement.
+  6. Click "Generate Access Token" -> log in/allow -> copy the token.
+  7. In the Explorer, find your Instagram ID (type into the URL box, send):
+       me/accounts                 -> copy the page "id"
+       <page-id>?fields=instagram_business_account
+                                   -> the "id" returned is IG_USER_ID
+  8. .env:
+       IG_USER_ID=the_id_from_above
+       IG_ACCESS_TOKEN=the_copied_token
+  After this, both card news (images) and Reels (video) can post to Instagram.
+
+(2) THREADS (same Meta app as Instagram)
+  1. In the SAME app at developers.facebook.com, add product "Threads API".
+  2. Threads API -> Settings -> add permissions:
+       threads_basic, threads_content_publish.
+  3. Generate token -> copy the access token.
+  4. Find your Threads ID — in the browser address bar:
+       https://graph.threads.net/v1.0/me?fields=id,username&access_token=YOUR_TOKEN
+     The returned "id" is THREADS_USER_ID.
+  5. .env:
+       THREADS_USER_ID=the_id
+       THREADS_ACCESS_TOKEN=the_copied_token
+
+(3) YOUTUBE (different — auto-issued by a script)
+  1. console.cloud.google.com -> create a project (top bar).
+  2. APIs & Services -> Library -> search "YouTube Data API v3" -> Enable.
+  3. OAuth consent screen -> External -> fill app name/email ->
+     add your own Google account under "Test users".
+  4. Credentials -> Create -> OAuth client ID ->
+     Application type: Desktop app.
+  5. Download the JSON of that client -> rename it to "client_secret.json"
+     and put it in the cardnews\scripts\ folder.
+  6. Issue the token (in cmd / the run window):
+       python scripts\get_youtube_token.py
+     The browser opens -> log in/allow -> paste the THREE lines printed
+     in the terminal into .env exactly:
+       YOUTUBE_CLIENT_ID=...
+       YOUTUBE_CLIENT_SECRET=...
+       YOUTUBE_REFRESH_TOKEN=...
+
+(4) TIKTOK (last)
+  1. developers.tiktok.com -> log in -> Manage apps -> create an app.
+  2. Add "Content Posting API" to the app; request scope "video.publish".
+  3. Through the OAuth flow, issue an access token -> .env:
+       TIKTOK_ACCESS_TOKEN=the_issued_token
+  Warning: before TikTok app audit passes, posts go out as PRIVATE
+  (SELF_ONLY) only. Private testing on your own account works immediately;
+  public posting is available after the audit. (This is TikTok's policy.)
+
+After entering everything:
+  Run run_windows.bat (or menu [2]) -> in the browser, test-publish
+  one item at a time as PRIVATE.
+
+Common stumbling points:
+  - Instagram step 7 (looking up the ID).
+  - YouTube OAuth consent screen.
+  If you get stuck on a screen, send the screenshot/error and we'll fix
+  just that spot.
+
+--------------------------------------------------------------
+9. GOOGLE DRIVE (for video uploads)
+--------------------------------------------------------------
+1. Upload the video to Drive -> right-click -> Share.
+2. Change general access to "Anyone with the link" (same as the demo!).
+3. Copy the link -> paste it into the "Drive link" field on the
+   Video tab of the web UI.
+Note: if it stays "Restricted", the API cannot access it and the post
+will FAIL. It MUST be "Anyone with the link".
+
+--------------------------------------------------------------
+10. CLOUD DEPLOYMENT (run 24/7) — see DEPLOY.md
+--------------------------------------------------------------
+Railway (recommended):
+  1. railway.app -> sign in with GitHub.
+  2. New Project -> Deploy from GitHub repo -> select this repo.
+  3. Set Root Directory to "cardnews".
+  4. Start Command:
+       uvicorn app.main:app --host 0.0.0.0 --port $PORT
+  5. In Variables, add your .env values line by line
+     (only the ones you need).
+  6. Take the generated public URL (e.g. https://xxx.up.railway.app),
+     also set it as PUBLIC_BASE_URL, and redeploy.
+  7. Open that URL — usable from anywhere (even your phone).
+
+Render:
+  1. render.com -> sign up.
+  2. New -> Web Service -> connect the GitHub repo.
+  3. Root Directory: cardnews
+     Build Command: pip install -r requirements.txt
+     Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+  4. Add .env values under Environment.
+  5. After deploy, put the new address into PUBLIC_BASE_URL and redeploy.
+
+Post-deploy checklist:
+  [ ] Does PUBLIC_BASE_URL match the deployed https address?
+  [ ] Are all needed platform tokens set as environment variables?
+  [ ] Does /health return "ok" when you open the address?
+  [ ] Does a private test publish succeed?
+
+--------------------------------------------------------------
+11. API ENDPOINTS (reference)
+--------------------------------------------------------------
+GET  /                      Web UI
+GET  /api/options           Template/tone/provider lists
+POST /api/generate          Generate + render card news from text/link
+POST /api/upload            Publish card news now (incl. pinned comment)
+POST /api/video             Video upload (now or scheduled, multi-platform)
+POST /api/schedule          Schedule a card-news job
+GET  /api/jobs              List scheduled jobs
+POST /api/jobs/{id}/cancel  Cancel a scheduled job
+POST /api/bulk              Bulk register from Excel/CSV
+GET  /api/bulk/sample       Sample CSV (?kind=video for the video sample)
+GET  /output/<file>         Generated images (served publicly)
+GET  /health               Health check
+
+--------------------------------------------------------------
+12. .env EXAMPLE (use your own values)
+--------------------------------------------------------------
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+PUBLIC_BASE_URL=https://xxxx.ngrok-free.app
+TIMEZONE=Asia/Seoul
+
+THREADS_USER_ID=...
+THREADS_ACCESS_TOKEN=...
+IG_USER_ID=...
+IG_ACCESS_TOKEN=...
+YOUTUBE_CLIENT_ID=...
+YOUTUBE_CLIENT_SECRET=...
+YOUTUBE_REFRESH_TOKEN=...
+TIKTOK_ACCESS_TOKEN=...
+
+You only need to fill in the values for the platforms you use.
+(e.g. if you only use Threads, fill only the Threads values.)
+
+==============================================================
+  END
+==============================================================
